@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.ipynb_checkpoints/
+.spyderproject
+.spyproject
+.vscode/
+.idea/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
