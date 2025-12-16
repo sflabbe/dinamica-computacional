@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Problema 4 (pórtico 1 piso) — análisis dinámico no lineal tipo SDOF calibrado con el pórtico elástico.
+(pórtico 1 piso) — análisis dinámico no lineal tipo SDOF calibrado con el pórtico elástico.
 
 MODELO (pragmático para tarea):
 - 1 GDL: desplazamiento lateral del “piso” u(t) (diafragma rígido).
@@ -25,6 +25,28 @@ from dataclasses import dataclass
 import numpy as np
 import matplotlib.pyplot as plt
 
+
+from matplotlib.collections import LineCollection
+import matplotlib as mpl
+
+def plot_hysteresis_time_gradient(x, y, t, ax=None, cmap="plasma", lw=2.5, cbar_label="t [s]"):
+    """
+    Dibuja y(x) coloreado por tiempo t usando LineCollection (gradiente temporal).
+    """
+    if ax is None:
+        ax = plt.gca()
+    x = np.asarray(x); y = np.asarray(y); t = np.asarray(t)
+    pts = np.column_stack([x, y]).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    norm = mpl.colors.Normalize(vmin=float(t.min()), vmax=float(t.max()))
+    lc = LineCollection(segs, cmap=cmap, norm=norm)
+    lc.set_array(t[:-1])
+    lc.set_linewidth(lw)
+    ax.add_collection(lc)
+    ax.autoscale_view()
+    cbar = plt.colorbar(lc, ax=ax)
+    cbar.set_label(cbar_label)
+    return ax
 
 # -------------------------
 # Constantes / unidades
@@ -305,6 +327,9 @@ def portal_elastic_K0_and_moment_coeffs(Ec, sec_col, sec_beam, H=3.0, L=5.0):
     M_col_bases = []
     M_beam_ends = []
 
+
+    U_col = 0.0
+    U_beam = 0.0
     for name, (n1, n2, A, I, kG, kL, T, L_e) in elem_cache.items():
         edofs = [
             dof(n1,0), dof(n1,1), dof(n1,2),
@@ -313,6 +338,12 @@ def portal_elastic_K0_and_moment_coeffs(Ec, sec_col, sec_beam, H=3.0, L=5.0):
         d_e_global = d_full[edofs]
         d_e_local = T @ d_e_global
         f_local = kL @ d_e_local
+
+        Ue = 0.5 * float(d_e_local.T @ (kL @ d_e_local))
+        if name.startswith("col"):
+            U_col += Ue
+        elif name == "beam":
+            U_beam += Ue
         # f_local: [N1, V1, M1, N2, V2, M2] (convención local)
         M1 = f_local[2]
         M2 = f_local[5]
@@ -329,10 +360,8 @@ def portal_elastic_K0_and_moment_coeffs(Ec, sec_col, sec_beam, H=3.0, L=5.0):
 
     m_col_base = float(np.max(np.abs(M_col_bases)))  # N*m por N
     m_beam_end = float(np.max(np.abs(M_beam_ends)))
-
-    return float(K0), m_col_base, m_beam_end
-
-
+    r_col = float(U_col / (U_col + U_beam + 1e-30))
+    return float(K0), m_col_base, m_beam_end, r_col
 # -------------------------
 # Histeresis: columnas EPP + viga Bouc–Wen con degradación
 # -------------------------
@@ -595,7 +624,7 @@ def main():
     # -------------------------
     # 2) Rigidez elástica K0 del pórtico + coeficientes (M/V)
     # -------------------------
-    K0, m_col_base, m_beam_end = portal_elastic_K0_and_moment_coeffs(Ec, S1, S2, H=H, L=L)
+    K0, m_col_base, m_beam_end, r_col = portal_elastic_K0_and_moment_coeffs(Ec, S1, S2, H=H, L=L)
 
     # Masa para T0
     w0 = 2.0 * PI / T0
@@ -625,14 +654,14 @@ def main():
     # Primer yield global (aprox)
     Vy_first = min(Vy_col, Vy_beam)
     uy_first = Vy_first / K0
-
-    # Partición K0 en paralelo: el componente "débil" llega a fluencia en uy_first
-    if Vy_col <= Vy_beam:
-        Kc = Vy_col / (uy_first + 1e-30)
-        Kb = max(K0 - Kc, 0.05 * K0)
-    else:
-        Kb = Vy_beam / (uy_first + 1e-30)
-        Kc = max(K0 - Kb, 0.05 * K0)
+    # Partición de rigidez en paralelo (más física): por energía elástica FEM (caso V=1 N)
+    # r_col viene de portal_elastic_K0_and_moment_coeffs()
+    Kc = max(r_col * K0, 0.05 * K0)
+    Kb = max((1.0 - r_col) * K0, 0.05 * K0)
+    # Renormaliza para asegurar Kc + Kb = K0 exactamente
+    s = Kc + Kb
+    Kc *= K0 / (s + 1e-30)
+    Kb *= K0 / (s + 1e-30)
 
     # Amortiguamiento 5% en T0
     zeta = 0.05
@@ -647,7 +676,7 @@ def main():
     print(f"m_col_base = {m_col_base:.3f} m  | m_beam_end = {m_beam_end:.3f} m  (momento por 1N de V)")
     print(f"Vy_col = {Vy_col/1e3:.1f} kN | Vy_beam = {Vy_beam/1e3:.1f} kN")
     print(f"Vy_first = {Vy_first/1e3:.1f} kN -> uy_first={uy_first*1000:.2f} mm")
-    print(f"Partición: Kc={Kc/K0:.2f} K0, Kb={Kb/K0:.2f} K0")
+    print(f"Partición (energía FEM): r_col={r_col:.2f} -> Kc={Kc/K0:.2f} K0, Kb={Kb/K0:.2f} K0")
     print(f"Damping c = {c:.2e} N·s/m (ζ=5% en T0)")
 
     # -------------------------
@@ -714,13 +743,12 @@ def main():
     plt.title(f"Historia u(t) — A={results[-1,0]:.1f}g" + (" (colapso)" if last_out["collapsed"] else ""))
     plt.grid(True, alpha=0.3)
 
-    plt.figure()
-    plt.plot(u, V/1e3)
-    plt.xlabel("u [m]")
-    plt.ylabel("V_restaurador [kN]")
-    plt.title(f"Histeresis V–u — A={results[-1,0]:.1f}g")
-    plt.grid(True, alpha=0.3)
-
+    fig, ax = plt.subplots()
+    plot_hysteresis_time_gradient(u, V/1e3, t, ax=ax, cmap="plasma", lw=2.5, cbar_label="t [s]")
+    ax.set_xlabel("u [m]")
+    ax.set_ylabel("V_restaurador [kN]")
+    ax.set_title(f"Histeresis V–u (gradiente temporal) — A={results[-1,0]:.1f}g")
+    ax.grid(True, alpha=0.3)
     plt.figure()
     plt.plot(t, Fy_b/1e3, label="Fy_beam")
     plt.plot(t, K_b/1e6, label="K_beam")
