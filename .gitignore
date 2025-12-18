@@ -1,12 +1,23 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
 .venv/
-.env
-.ipynb_checkpoints/
-.spyderproject
-.spyproject
+venv/
+env/
+.conda/
+
+# IDE
 .vscode/
 .idea/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+.spyderproject
+.spyproject
+
+# Outputs
+*.png
+*.pdf
+*.csv
+results/
+output/

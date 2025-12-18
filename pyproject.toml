@@ -1,0 +1,8 @@
+[project]
+name = "plastic-hinge-nm"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = ["numpy", "matplotlib"]
+
+[tool.setuptools]
+packages = ["plastic_hinge"]

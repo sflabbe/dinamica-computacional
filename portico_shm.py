@@ -1,539 +1,843 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-(pórtico 1 piso) — análisis dinámico no lineal tipo SDOF calibrado con el pórtico elástico.
-
-MODELO (pragmático para tarea):
-- 1 GDL: desplazamiento lateral del “piso” u(t) (diafragma rígido).
-- Rigidez elástica K0 y coeficientes de momentos por cortante (M/V) obtenidos con FE lineal del pórtico 2D.
-- Resistencia no lineal como suma en PARALELO:
-    (i) "Columnas" : resorte elasto-plástico ideal (EPP) en cortante (sin degradación),
-        con Vy_col derivado de My_col(N) / (Mbase/V).
-        My_col(N) se obtiene de la curva interacción N–M de la sección S1 (Problema 2).
-        Axial N se toma constante = (M*g)/2 por columna (peso del piso).
-    (ii) "Viga" : resorte Bouc–Wen “SHM” con degradación de rigidez y resistencia (editable),
-        con Vy_beam derivado de My_beam(N≈0) / (Mendbeam/V) usando sección S2.
-- Efecto P–Δ incluido como rigidez geométrica negativa: Kgeo = P_total/H.
-- Amortiguamiento viscoso equivalente: ζ=5% en el período elástico T0=0.5s.
-- Excitación: a_g(t)=A cos(0.2π t) sin(4π t), 0<=t<=10s.
-- Barrido de amplitudes A = 0.1g, 0.2g, ... hasta colapso (criterio por deriva).
-
-DEPENDENCIAS: numpy, matplotlib
+portico_shm.py — Pórtico 1 piso (SDOF) no lineal con:
+- Resorte columnas (EPP o Bouc–Wen, opcional 2 columnas en paralelo)
+- Resorte viga (Bouc–Wen con degradación por energía)
+- P-Delta como rigidez geométrica negativa: Kgeo = P_total / H
+- Integradores:
+    * Velocity-Verlet (explícito, con fixed-point para damping + histeresis)
+    * HHT-α (implícito, amortiguamiento numérico alta frecuencia)
+- Excitación:
+    * seno tipo tarea
+    * choque (Ricker / impulso)
+    * combo (seno + choque)
+    * archivo CSV (p.ej. señales de tren: Time_s + Acceleration_g)
+- Estudio paramétrico y plots (u(t), V-u, gradiente temporal, ringing HF)
+Uso: ver al final ("COMANDOS ÚTILES").
 """
 
+from __future__ import annotations
+
+import os
+import time
+import math
 from dataclasses import dataclass
+from typing import Dict, Any, Optional, List, Tuple, Callable
+
 import numpy as np
 import matplotlib.pyplot as plt
-
-
 from matplotlib.collections import LineCollection
 import matplotlib as mpl
 
-def plot_hysteresis_time_gradient(x, y, t, ax=None, cmap="plasma", lw=2.5, cbar_label="t [s]"):
-    """
-    Dibuja y(x) coloreado por tiempo t usando LineCollection (gradiente temporal).
-    """
-    if ax is None:
-        ax = plt.gca()
-    x = np.asarray(x); y = np.asarray(y); t = np.asarray(t)
-    pts = np.column_stack([x, y]).reshape(-1, 1, 2)
-    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-    norm = mpl.colors.Normalize(vmin=float(t.min()), vmax=float(t.max()))
-    lc = LineCollection(segs, cmap=cmap, norm=norm)
-    lc.set_array(t[:-1])
-    lc.set_linewidth(lw)
-    ax.add_collection(lc)
-    ax.autoscale_view()
-    cbar = plt.colorbar(lc, ax=ax)
-    cbar.set_label(cbar_label)
-    return ax
 
 # -------------------------
-# Constantes / unidades
+# Constantes
 # -------------------------
-g = 9.80665  # m/s^2
-PI = np.pi
+g = 9.81
 
 
 # -------------------------
-# Secciones RC (para interacción N–M)
+# Helpers ENV (CLI sin argparse)
 # -------------------------
-def area_bar(phi_m: float) -> float:
-    return PI * (phi_m**2) / 4.0
+def _envs(key: str, default: str) -> str:
+    return str(os.environ.get(key, default)).strip()
 
 
-@dataclass(frozen=True)
-class RebarLayerSI:
-    y_m_from_top: float
-    n_bars: int
-    phi_m: float
-
-    @property
-    def area_m2(self) -> float:
-        return self.n_bars * area_bar(self.phi_m)
+def _envi(key: str, default: int) -> int:
+    try:
+        return int(float(os.environ.get(key, str(default))))
+    except Exception:
+        return int(default)
 
 
-@dataclass(frozen=True)
-class RCSectionSI:
-    name: str
-    b_m: float
-    h_m: float
-    layers: tuple  # tuple[RebarLayerSI, ...]
-
-    @property
-    def y_ref(self) -> float:
-        return 0.5 * self.h_m
-
-
-def NM_from_neutral_axis_SI(
-    sec: RCSectionSI,
-    c_m: float,
-    fc_Pa: float,
-    fy_Pa: float,
-    alpha: float = 0.85,
-    compression_at: str = "top",  # "top" o "bottom"
-) -> tuple[float, float]:
-    """
-    Devuelve (N, M) en (N, N*m).
-    N>0 compresión.
-    M respecto al centroide (y_ref), y positivo con compresión "arriba" (convención simple).
-    """
-    b, h = sec.b_m, sec.h_m
-    y_ref = sec.y_ref
-
-    # espejo para "compresión abajo"
-    def y_eff(y):
-        return y if compression_at == "top" else (h - y)
-
-    # hormigón: bloque rectangular en [0, a]
-    a = float(np.clip(c_m, 0.0, h))
-    sig_c = alpha * fc_Pa
-    Nc = sig_c * b * a  # N
-    yc = 0.5 * a
-    yC_global = yc if compression_at == "top" else (h - yc)
-    Mc = Nc * (yC_global - y_ref)
-
-    # acero: perfectamente plástico ±fy
-    Ns = 0.0
-    Ms = 0.0
-    for L in sec.layers:
-        yL_eff = y_eff(L.y_m_from_top)
-        sig_s = +fy_Pa if (yL_eff < c_m) else -fy_Pa
-        Fs = sig_s * L.area_m2
-        Ns += Fs
-        y_global = L.y_m_from_top
-        Ms += Fs * (y_global - y_ref)
-
-    return float(Nc + Ns), float(Mc + Ms)
-
-
-def sample_interaction_cloud_SI(
-    sec: RCSectionSI,
-    fc_Pa: float,
-    fy_Pa: float,
-    alpha: float = 0.85,
-    n_c: int = 600,
-) -> np.ndarray:
-    """Nube de puntos (N,M) muestreando c en [0,h] para compresión arriba y abajo."""
-    c_vals = np.linspace(0.0, sec.h_m, n_c)
-    pts = []
-    for comp in ("top", "bottom"):
-        for c in c_vals:
-            N, M = NM_from_neutral_axis_SI(sec, c, fc_Pa, fy_Pa, alpha=alpha, compression_at=comp)
-            pts.append((N, M))
-    return np.array(pts, dtype=float)
-
-
-def convex_hull_2d(points: np.ndarray) -> np.ndarray:
-    """
-    Andrew monotone chain. Devuelve vértices CCW sin repetir.
-    points: (N,2)
-    """
-    pts = np.unique(points.round(6), axis=0)
-    pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
-
-    def cross(o, a, b):
-        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
-
-    lower = []
-    for p in pts:
-        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
-            lower.pop()
-        lower.append(tuple(p))
-
-    upper = []
-    for p in reversed(pts):
-        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
-            upper.pop()
-        upper.append(tuple(p))
-
-    hull = lower[:-1] + upper[:-1]
-    return np.array(hull, dtype=float)
-
-
-def M_capacity_at_N(poly_NM: np.ndarray, N0: float) -> tuple[float, float]:
-    """
-    Dado un polígono (casco convexo) en (N,M), encuentra intersecciones con la recta N=N0.
-    Retorna (Mmax_pos, Mmin_neg) en N*m.
-    Si no intersecta, retorna (nan, nan).
-    """
-    Ms = []
-    n = len(poly_NM)
-    for i in range(n):
-        N1, M1 = poly_NM[i]
-        N2, M2 = poly_NM[(i+1) % n]
-        if (N0 - N1) * (N0 - N2) <= 0 and abs(N2 - N1) > 1e-12:
-            t = (N0 - N1) / (N2 - N1)
-            if 0.0 <= t <= 1.0:
-                Mx = M1 + t * (M2 - M1)
-                Ms.append(Mx)
-
-    if len(Ms) < 2:
-        return (np.nan, np.nan)
-
-    Ms = np.array(Ms)
-    return float(np.max(Ms)), float(np.min(Ms))
+def _envf(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, str(default)))
+    except Exception:
+        return float(default)
 
 
 # -------------------------
-# FE lineal del pórtico para K0 y coeficientes de momentos por V
+# Señal: métricas de "ringing" / serrucho
 # -------------------------
-def frame_element_k_global(E, A, I, x1, y1, x2, y2):
-    L = float(np.hypot(x2 - x1, y2 - y1))
-    c = (x2 - x1) / L
-    s = (y2 - y1) / L
-
-    EA_L = E * A / L
-    EI = E * I
-
-    kL = np.array([
-        [ EA_L,        0,           0, -EA_L,        0,           0],
-        [    0,  12*EI/L**3,  6*EI/L**2,    0, -12*EI/L**3,  6*EI/L**2],
-        [    0,   6*EI/L**2,   4*EI/L,     0,  -6*EI/L**2,   2*EI/L],
-        [-EA_L,       0,           0,  EA_L,        0,           0],
-        [    0, -12*EI/L**3, -6*EI/L**2,   0,  12*EI/L**3, -6*EI/L**2],
-        [    0,   6*EI/L**2,   2*EI/L,     0,  -6*EI/L**2,   4*EI/L],
-    ], dtype=float)
-
-    T = np.array([
-        [ c,  s, 0, 0, 0, 0],
-        [-s,  c, 0, 0, 0, 0],
-        [ 0,  0, 1, 0, 0, 0],
-        [ 0,  0, 0, c,  s, 0],
-        [ 0,  0, 0,-s,  c, 0],
-        [ 0,  0, 0, 0,  0, 1],
-    ], dtype=float)
-
-    kG = T.T @ kL @ T
-    return kG, kL, T, L
+def jerk_rms(a: np.ndarray, dt: float) -> float:
+    """RMS del jerk (derivada de a) en unidades de g/s."""
+    if len(a) < 3:
+        return 0.0
+    j = np.diff(a) / dt
+    return float(np.sqrt(np.mean(j * j)) / g)
 
 
-def portal_elastic_K0_and_moment_coeffs(Ec, sec_col, sec_beam, H=3.0, L=5.0):
+def roughness_second_diff(x: np.ndarray) -> float:
     """
-    Pórtico con 4 nodos:
-      1:(0,0)  2:(L,0)  3:(0,H)  4:(L,H)
-    Bases fijas (u,v,θ=0). En techo: v3=v4=0. Diafragma: u3=u4 (=u).
-
-    Devuelve:
-      K0 [N/m]
-      m_col_base [N*m per N]   (máximo abs entre 2 bases)
-      m_beam_end [N*m per N]   (máximo abs entre 2 extremos)
+    Proxy serrucho / ringing: norma L1 de la segunda diferencia (sin normalizar).
+    Crece fuerte cuando la señal se vuelve "diente de sierra".
     """
-    coords = {
-        1: (0.0, 0.0),
-        2: (L,   0.0),
-        3: (0.0, H),
-        4: (L,   H),
-    }
-
-    # DOFs globales: [u,v,θ] por nodo
-    def dof(node, comp):  # comp: 0=u,1=v,2=θ
-        return 3*(node-1) + comp
-
-    ndof = 12
-    K = np.zeros((ndof, ndof))
-
-    # propiedades geométricas elásticas (usamos concreto "bruto")
-    Acol = sec_col.b_m * sec_col.h_m
-    Icol = sec_col.b_m * sec_col.h_m**3 / 12.0
-    Abeam = sec_beam.b_m * sec_beam.h_m
-    Ibeam = sec_beam.b_m * sec_beam.h_m**3 / 12.0
-
-    elements = [
-        ("colL", 1, 3, Acol, Icol),
-        ("colR", 2, 4, Acol, Icol),
-        ("beam", 3, 4, Abeam, Ibeam),
-    ]
-
-    # ensamblaje
-    elem_cache = {}
-    for name, n1, n2, A, I in elements:
-        x1, y1 = coords[n1]
-        x2, y2 = coords[n2]
-        kG, kL, T, L_e = frame_element_k_global(Ec, A, I, x1, y1, x2, y2)
-        elem_cache[name] = (n1, n2, A, I, kG, kL, T, L_e)
-
-        edofs = [
-            dof(n1,0), dof(n1,1), dof(n1,2),
-            dof(n2,0), dof(n2,1), dof(n2,2),
-        ]
-        for i in range(6):
-            for j in range(6):
-                K[edofs[i], edofs[j]] += kG[i,j]
-
-    # Restricciones:
-    fixed = set()
-    # bases totalmente fijas
-    for n in (1,2):
-        fixed.update([dof(n,0), dof(n,1), dof(n,2)])
-    # techo v=0
-    fixed.update([dof(3,1), dof(4,1)])
-
-    # libres (antes de amarrar diafragma)
-    free = [i for i in range(ndof) if i not in fixed]
-    # free debería ser [u3,θ3,u4,θ4]
-    # Construimos K_free
-    Kf = K[np.ix_(free, free)]
-
-    # Mapear q=[u,θ3,θ4] a d_free=[u3,θ3,u4,θ4]
-    # d_free = [u, θ3, u, θ4]
-    C = np.array([
-        [1,0,0],  # u3
-        [0,1,0],  # θ3
-        [1,0,0],  # u4
-        [0,0,1],  # θ4
-    ], dtype=float)
-
-    K_red = C.T @ Kf @ C
-
-    # Fuerza lateral total 1 N en el diafragma: repartir 0.5 y 0.5 en u3 y u4
-    F_free = np.array([0.5, 0.0, 0.5, 0.0], dtype=float)
-    F_red = C.T @ F_free  # = [1,0,0]
-
-    q = np.linalg.solve(K_red, F_red)
-    u = q[0]
-    K0 = 1.0 / u
-
-    # reconstruir d_global para calcular fuerzas internas
-    d_full = np.zeros(ndof)
-    # set top
-    d_full[dof(3,0)] = u
-    d_full[dof(4,0)] = u
-    d_full[dof(3,2)] = q[1]
-    d_full[dof(4,2)] = q[2]
-    # v3=v4=0 ya
-
-    # extraer momentos de extremo por V=1
-    M_col_bases = []
-    M_beam_ends = []
+    if len(x) < 3:
+        return 0.0
+    d2 = np.diff(x, n=2)
+    return float(np.sum(np.abs(d2)))
 
 
-    U_col = 0.0
-    U_beam = 0.0
-    for name, (n1, n2, A, I, kG, kL, T, L_e) in elem_cache.items():
-        edofs = [
-            dof(n1,0), dof(n1,1), dof(n1,2),
-            dof(n2,0), dof(n2,1), dof(n2,2),
-        ]
-        d_e_global = d_full[edofs]
-        d_e_local = T @ d_e_global
-        f_local = kL @ d_e_local
+def hf_ratio(x: np.ndarray, dt: float, f_cut: float) -> float:
+    """
+    Fracción de energía espectral por arriba de f_cut.
+    (0 = nada HF, 1 = todo HF). Usa rFFT y potencia.
+    """
+    n = len(x)
+    if n < 8:
+        return 0.0
+    x0 = x - float(np.mean(x))
+    X = np.fft.rfft(x0)
+    f = np.fft.rfftfreq(n, d=dt)
+    p = (X.real * X.real + X.imag * X.imag)
+    tot = float(np.sum(p)) + 1e-30
+    hf = float(np.sum(p[f >= f_cut]))
+    return hf / tot
 
-        Ue = 0.5 * float(d_e_local.T @ (kL @ d_e_local))
-        if name.startswith("col"):
-            U_col += Ue
-        elif name == "beam":
-            U_beam += Ue
-        # f_local: [N1, V1, M1, N2, V2, M2] (convención local)
-        M1 = f_local[2]
-        M2 = f_local[5]
 
-        if name.startswith("col"):
-            # base es el nodo de abajo (1 o 2)
-            if n1 in (1,2):
-                M_col_bases.append(M1)
+# -------------------------
+# Excitación ag(t)
+# -------------------------
+@dataclass
+class Excitation:
+    type: str = "sine"  # sine|shock|combo|file
+    # Sine (default de la tarea)
+    sine_w1_hz: float = 2.0     # sin(2π*w1*t) factor
+    sine_w2_hz: float = 2.0     # cos(2π*w2*t) factor
+    sine_scale: float = 1.0
+
+    # Shock: Ricker wavelet (pico en t0)
+    shock_f0_hz: float = 20.0
+    shock_t0_s: float = 1.0
+    shock_scale: float = 1.0
+
+    # Combo
+    combo_sine_scale: float = 1.0
+    combo_shock_scale: float = 0.5
+
+    # File
+    file_path: str = ""
+    file_time_col: str = "Time_s"
+    file_acc_col: str = "Acceleration_g"  # o Building_a_g
+    file_units: str = "auto"  # auto|g|m/s2
+    file_scale: float = 1.0
+
+    # (cache interno)
+    _t: Optional[np.ndarray] = None
+    _a_ms2: Optional[np.ndarray] = None
+
+    def _ricker(self, t: float) -> float:
+        # Ricker / Mexican hat: (1 - 2π^2 f0^2 τ^2) e^{-π^2 f0^2 τ^2}
+        f0 = self.shock_f0_hz
+        tau = t - self.shock_t0_s
+        a = (math.pi * f0 * tau)
+        return (1.0 - 2.0 * a * a) * math.exp(-a * a)
+
+    def _sine(self, t: float) -> float:
+        # señal tipo tarea (modulada)
+        w1 = 2.0 * math.pi * self.sine_w1_hz
+        w2 = 2.0 * math.pi * self.sine_w2_hz
+        return math.cos(w2 * t) * math.sin(w1 * t)
+
+    def _load_file(self) -> None:
+        if self._t is not None and self._a_ms2 is not None:
+            return
+        if not self.file_path:
+            raise ValueError("EXC_TYPE=file pero EXC_FILE está vacío.")
+
+        path = self.file_path
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"No existe EXC_FILE='{path}'")
+
+        # lectura CSV robusta: intenta pandas, si no, numpy.genfromtxt
+        t = None
+        a = None
+
+        try:
+            import pandas as pd  # type: ignore
+            df = pd.read_csv(path)
+            if self.file_time_col not in df.columns:
+                raise KeyError(f"No encuentro columna tiempo '{self.file_time_col}' en {list(df.columns)[:20]}...")
+            if self.file_acc_col not in df.columns:
+                raise KeyError(f"No encuentro columna accel '{self.file_acc_col}' en {list(df.columns)[:20]}...")
+            t = df[self.file_time_col].to_numpy(dtype=float)
+            a = df[self.file_acc_col].to_numpy(dtype=float)
+        except Exception:
+            data = np.genfromtxt(path, delimiter=",", names=True, dtype=None, encoding="utf-8")
+            if self.file_time_col not in data.dtype.names:
+                raise KeyError(f"No encuentro columna tiempo '{self.file_time_col}' en {data.dtype.names}")
+            if self.file_acc_col not in data.dtype.names:
+                raise KeyError(f"No encuentro columna accel '{self.file_acc_col}' en {data.dtype.names}")
+            t = np.asarray(data[self.file_time_col], dtype=float)
+            a = np.asarray(data[self.file_acc_col], dtype=float)
+
+        # normaliza: t ascendente
+        idx = np.argsort(t)
+        t = t[idx]
+        a = a[idx]
+
+        units = self.file_units.lower().strip()
+        if units == "auto":
+            # heurística: si el nombre dice _g o el rango es ~ decenas -> g
+            if ("_g" in self.file_acc_col.lower()) or (np.nanmax(np.abs(a)) < 80.0):
+                units = "g"
             else:
-                M_col_bases.append(M2)
-        if name == "beam":
-            M_beam_ends.append(M1)
-            M_beam_ends.append(M2)
+                units = "m/s2"
 
-    m_col_base = float(np.max(np.abs(M_col_bases)))  # N*m por N
-    m_beam_end = float(np.max(np.abs(M_beam_ends)))
-    r_col = float(U_col / (U_col + U_beam + 1e-30))
-    return float(K0), m_col_base, m_beam_end, r_col
+        if units in ("g", "gal", "gee"):
+            a_ms2 = a * g
+        elif units in ("m/s2", "m/s^2", "ms2"):
+            a_ms2 = a
+        else:
+            raise ValueError(f"EXC_FILE_UNITS inválido: {self.file_units} (usa auto|g|m/s2)")
+
+        # aplica escala extra
+        a_ms2 = self.file_scale * a_ms2
+
+        self._t = t
+        self._a_ms2 = a_ms2
+
+    def ag(self, t: float, A_ms2: float) -> float:
+        """
+        Devuelve aceleración [m/s²]. A_ms2 suele ser (A_factor_g*g).
+        Convención:
+          - sine/shock/combo: A_ms2 escala la señal base.
+          - file: la señal del archivo se escala por (A_ms2/g) para que A_factor_g actúe como factor.
+        """
+        typ = self.type.lower().strip()
+        if typ == "sine":
+            return A_ms2 * self.sine_scale * self._sine(t)
+        if typ == "shock":
+            return A_ms2 * self.shock_scale * self._ricker(t)
+        if typ == "combo":
+            return (A_ms2 * self.combo_sine_scale * self._sine(t)
+                    + A_ms2 * self.combo_shock_scale * self._ricker(t))
+        if typ == "file":
+            self._load_file()
+            assert self._t is not None and self._a_ms2 is not None
+            # interp lineal
+            a0 = float(np.interp(t, self._t, self._a_ms2))
+            scale = A_ms2 / g  # => A_factor_g
+            return scale * a0
+        raise ValueError(f"EXC_TYPE inválido: {self.type} (sine|shock|combo|file)")
+
+
+def plot_excitation(exc: Excitation, A_factor_g: float, dt: float, tmax: float) -> None:
+    t = np.arange(0.0, tmax + 0.5 * dt, dt)
+    a = np.array([exc.ag(float(ti), A_factor_g * g) for ti in t], dtype=float)
+    plt.figure()
+    plt.plot(t, a / g)
+    plt.xlabel("t [s]")
+    plt.ylabel("a_g(t) [g]")
+    plt.title(f"Excitación: {exc.type} | A={A_factor_g:.2f}g")
+    plt.grid(True)
+
+
 # -------------------------
-# Histeresis: columnas EPP + viga Bouc–Wen con degradación
+# Modelo: Elementos no lineales (interfaz con snapshot/restore)
 # -------------------------
-@dataclass
-class ColEPP:
-    K: float      # N/m
-    Fy: float     # N
-    up: float = 0.0  # desplazamiento plástico (m)
+class Element:
+    def snapshot(self) -> Dict[str, Any]:
+        return {}
 
-    def force_update(self, u: float) -> float:
-        f_tr = self.K * (u - self.up)
-        if abs(f_tr) <= self.Fy:
-            return f_tr
-        f = np.sign(f_tr) * self.Fy
-        self.up = u - f / self.K
-        return f
-
-
-@dataclass
-class BeamBoucWenDegrading:
-    K0: float
-    Fy0: float
-    alpha: float = 0.05
-    beta: float = 0.5
-    gamma: float = 0.5
-    n: float = 2.0
-    # degradación (ajusta libremente)
-    c_strength: float = 0.40
-    c_stiff: float = 0.20
-
-    z: float = 0.0      # variable histérica (dimensionless)
-    E_diss: float = 0.0 # energía histérica acumulada (J aproximada = N*m)
-    K: float = None
-    Fy: float = None
-
-    def __post_init__(self):
-        self.K = float(self.K0)
-        self.Fy = float(self.Fy0)
-
-    def degrade(self):
-        # Energía de referencia: Fy0 * uy0
-        uy0 = self.Fy0 / (self.K0 + 1e-30)
-        E0 = self.Fy0 * uy0 + 1e-30
-        rF = 1.0 / (1.0 + self.c_strength * self.E_diss / E0)
-        rK = 1.0 / (1.0 + self.c_stiff   * self.E_diss / E0)
-        self.Fy = self.Fy0 * rF
-        self.K  = self.K0  * rK
+    def restore(self, state: Dict[str, Any]) -> None:
+        _ = state
 
     def update_and_force(self, u_old: float, u_new: float, v_mid: float, dt: float) -> float:
-        # actualizar degradación
-        self.degrade()
+        raise NotImplementedError
 
-        uy = self.Fy / (self.K + 1e-30)
-        x_dot = v_mid / (uy + 1e-30)
 
-        # RK2 para z
-        def z_dot(z):
-            return (x_dot
-                    - self.beta * abs(x_dot) * (abs(z) ** (self.n - 1.0)) * z
-                    - self.gamma * x_dot * (abs(z) ** self.n))
+class Elastic(Element):
+    def __init__(self, k: float):
+        self.k = float(k)
 
-        z1 = self.z
-        k1 = z_dot(z1)
-        z_mid = z1 + 0.5 * dt * k1
-        k2 = z_dot(z_mid)
-        z2 = z1 + dt * k2
-        self.z = float(np.clip(z2, -1.5, 1.5))  # clip suave
+    def update_and_force(self, u_old: float, u_new: float, v_mid: float, dt: float) -> float:
+        _ = (u_old, v_mid, dt)
+        return self.k * float(u_new)
 
-        # fuerza
-        # parte elástica + parte histérica
-        f = self.alpha * self.K * u_new + (1.0 - self.alpha) * self.Fy * self.z
 
-        # energía histérica incremental (aprox)
-        du = u_new - u_old
-        f_h = (1.0 - self.alpha) * self.Fy * self.z
-        self.E_diss += abs(f_h * du)
+class EPP(Element):
+    """
+    Elastoplástico perfecto en fuerza (cortante): f = k(u - up), |f|<=Fy, up evoluciona.
+    """
+    def __init__(self, k: float, fy: float):
+        self.k = float(k)
+        self.fy = float(abs(fy))
+        self.up = 0.0  # offset plástico
 
+    def snapshot(self) -> Dict[str, Any]:
+        return {"up": float(self.up)}
+
+    def restore(self, state: Dict[str, Any]) -> None:
+        self.up = float(state.get("up", 0.0))
+
+    def update_and_force(self, u_old: float, u_new: float, v_mid: float, dt: float) -> float:
+        _ = (u_old, v_mid, dt)
+        u = float(u_new)
+        f_trial = self.k * (u - self.up)
+        if abs(f_trial) <= self.fy:
+            return float(f_trial)
+        f = self.fy * math.copysign(1.0, f_trial)
+        # actualiza up para que f = k(u-up)
+        self.up = u - f / self.k
         return float(f)
 
 
-# -------------------------
-# Ground motion
-# -------------------------
-def ag(t: float, A_g: float) -> float:
+class BoucWenDegrading(Element):
     """
-    A_g en [m/s^2] (o sea A*g).
-    a_g(t)=A cos(0.2π t) sin(4π t)
+    Bouc–Wen (histerético) + degradación simple por energía disipada.
+    Fuerza:
+        f = α K u + (1-α) Fy z
+    Evolución (forma clásica):
+        z_dot = x_dot - β|x_dot||z|^{n-1}z - γ x_dot |z|^n
+    donde x_dot ~ u_dot / uy
+    Degradación:
+        damage = 1 - exp(-E_diss / E_ref)
+        K = K0*(1 - c_stiff*damage)
+        Fy = Fy0*(1 - c_strength*damage)
     """
-    return A_g * np.cos(0.2 * PI * t) * np.sin(4.0 * PI * t)
+    def __init__(
+        self,
+        k0: float,
+        fy0: float,
+        alpha: float = 0.05,
+        beta: float = 0.5,
+        gamma: float = 0.5,
+        n: float = 2.0,
+        c_strength: float = 0.4,
+        c_stiff: float = 0.2,
+        e_ref: Optional[float] = None,
+    ):
+        self.k0 = float(k0)
+        self.fy0 = float(abs(fy0))
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.gamma = float(gamma)
+        self.n = float(n)
+        self.c_strength = float(c_strength)
+        self.c_stiff = float(c_stiff)
+
+        uy0 = self.fy0 / max(1e-30, self.k0)
+        self.e_ref = float(e_ref) if e_ref is not None else float(self.fy0 * uy0)
+
+        self.z = 0.0
+        self.E_diss = 0.0
+        self.K = self.k0
+        self.Fy = self.fy0
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "z": float(self.z),
+            "E_diss": float(self.E_diss),
+            "K": float(self.K),
+            "Fy": float(self.Fy),
+        }
+
+    def restore(self, state: Dict[str, Any]) -> None:
+        self.z = float(state.get("z", 0.0))
+        self.E_diss = float(state.get("E_diss", 0.0))
+        self.K = float(state.get("K", self.k0))
+        self.Fy = float(state.get("Fy", self.fy0))
+
+    def _update_damage(self) -> None:
+        dmg = 1.0 - math.exp(-self.E_diss / max(1e-30, self.e_ref))
+        self.K = self.k0 * max(0.02, 1.0 - self.c_stiff * dmg)
+        self.Fy = self.fy0 * max(0.05, 1.0 - self.c_strength * dmg)
+
+    def update_and_force(self, u_old: float, u_new: float, v_mid: float, dt: float) -> float:
+        # normaliza velocidad a x_dot ~ u_dot/uy
+        uy = self.Fy / max(1e-30, self.K)
+        xdot = float(v_mid) / max(1e-12, uy)
+
+        # RK2 para z
+        def z_dot(z: float, xdot_: float) -> float:
+            az = abs(z)
+            return xdot_ - self.beta * abs(xdot_) * (az ** (self.n - 1.0)) * z - self.gamma * xdot_ * (az ** self.n)
+
+        z0 = self.z
+        k1 = z_dot(z0, xdot)
+        z_half = z0 + 0.5 * dt * k1
+        k2 = z_dot(z_half, xdot)
+        z1 = z0 + dt * k2
+
+        # clipping suave para estabilidad (evitar z explote si dt es grande)
+        z1 = float(np.clip(z1, -2.0, 2.0))
+        self.z = z1
+
+        # fuerza
+        u = float(u_new)
+        f_hys = (1.0 - self.alpha) * self.Fy * self.z
+        f = self.alpha * self.K * u + f_hys
+
+        # energía disipada aprox (trabajo de la parte histerética)
+        du = float(u_new - u_old)
+        self.E_diss += abs(f_hys * du)
+
+        # degradación
+        self._update_damage()
+        return float(f)
+
+
+class Parallel(Element):
+    def __init__(self, springs: List[Element]):
+        self.springs = springs
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {"spr": [s.snapshot() for s in self.springs]}
+
+    def restore(self, state: Dict[str, Any]) -> None:
+        arr = state.get("spr", [])
+        for s, st in zip(self.springs, arr):
+            s.restore(st)
+
+    def update_and_force(self, u_old: float, u_new: float, v_mid: float, dt: float) -> float:
+        return float(sum(s.update_and_force(u_old, u_new, v_mid, dt) for s in self.springs))
 
 
 # -------------------------
-# Integración dinámica (Velocity Verlet + actualización histérica)
+# Pórtico lineal: K0 y momentos por unidad de cortante (mini-FE 2D)
 # -------------------------
-def run_time_history(
-    K0: float,
+def _frame_k_local(E: float, A: float, I: float, L: float) -> np.ndarray:
+    # elemento marco 2D (u,v,θ) por nodo: 6x6 local
+    EA_L = E * A / L
+    EI = E * I
+    k = np.zeros((6, 6), dtype=float)
+
+    k[0, 0] = EA_L
+    k[0, 3] = -EA_L
+    k[3, 0] = -EA_L
+    k[3, 3] = EA_L
+
+    k[1, 1] = 12 * EI / (L ** 3)
+    k[1, 2] = 6 * EI / (L ** 2)
+    k[1, 4] = -12 * EI / (L ** 3)
+    k[1, 5] = 6 * EI / (L ** 2)
+
+    k[2, 1] = 6 * EI / (L ** 2)
+    k[2, 2] = 4 * EI / L
+    k[2, 4] = -6 * EI / (L ** 2)
+    k[2, 5] = 2 * EI / L
+
+    k[4, 1] = -12 * EI / (L ** 3)
+    k[4, 2] = -6 * EI / (L ** 2)
+    k[4, 4] = 12 * EI / (L ** 3)
+    k[4, 5] = -6 * EI / (L ** 2)
+
+    k[5, 1] = 6 * EI / (L ** 2)
+    k[5, 2] = 2 * EI / L
+    k[5, 4] = -6 * EI / (L ** 2)
+    k[5, 5] = 4 * EI / L
+
+    return k
+
+
+def _frame_T(c: float, s: float) -> np.ndarray:
+    T = np.zeros((6, 6), dtype=float)
+    # node 1
+    T[0, 0] = c
+    T[0, 1] = s
+    T[1, 0] = -s
+    T[1, 1] = c
+    T[2, 2] = 1.0
+    # node 2
+    T[3, 3] = c
+    T[3, 4] = s
+    T[4, 3] = -s
+    T[4, 4] = c
+    T[5, 5] = 1.0
+    return T
+
+
+def portal_linear_response(
+    H: float,
+    L: float,
+    Ec: float,
+    Ac: float,
+    Ic: float,
+    Eb: float,
+    Ab: float,
+    Ib: float,
+) -> Dict[str, float]:
+    """
+    Portal 2D con 4 nodos:
+      1=(0,0), 2=(L,0), 3=(0,H), 4=(L,H)
+    Bases fijas (1 y 2). Top con v=0 y diafragma rígido: u3=u4=u.
+    Aplica cortante total V=1N (0.5 en u3 + 0.5 en u4).
+    Retorna:
+      K0 = 1/u
+      m_col_base = max |M_base| por N
+      m_beam_end = max |M_end| por N
+      r_col = U_col / (U_total)
+    """
+    # dof mapping: node i in [1..4], dof 0=u,1=v,2=th
+    def dof(node: int, comp: int) -> int:
+        return (node - 1) * 3 + comp
+
+    nd = 12
+    K = np.zeros((nd, nd), dtype=float)
+    F = np.zeros(nd, dtype=float)
+
+    # elementos: col izq (1-3), col der (2-4), viga (3-4)
+    elems = [
+        (1, 3, Ec, Ac, Ic),
+        (2, 4, Ec, Ac, Ic),
+        (3, 4, Eb, Ab, Ib),
+    ]
+
+    elem_info = []  # para post: (n1,n2,k_local,T)
+    coords = {
+        1: (0.0, 0.0),
+        2: (L, 0.0),
+        3: (0.0, H),
+        4: (L, H),
+    }
+
+    for (n1, n2, E, A, I) in elems:
+        x1, y1 = coords[n1]
+        x2, y2 = coords[n2]
+        dx = x2 - x1
+        dy = y2 - y1
+        Le = float(math.hypot(dx, dy))
+        c = dx / Le
+        s = dy / Le
+
+        k_loc = _frame_k_local(E, A, I, Le)
+        T = _frame_T(c, s)
+        k_g = T.T @ k_loc @ T
+
+        dofs = [
+            dof(n1, 0), dof(n1, 1), dof(n1, 2),
+            dof(n2, 0), dof(n2, 1), dof(n2, 2),
+        ]
+        for i in range(6):
+            for j in range(6):
+                K[dofs[i], dofs[j]] += k_g[i, j]
+
+        elem_info.append((n1, n2, k_loc, T))
+
+    # cargas: V=1N repartido
+    F[dof(3, 0)] += 0.5
+    F[dof(4, 0)] += 0.5
+
+    # BC + constraint u3=u4 con mapeo B
+    fixed = set()
+    for n in (1, 2):
+        fixed.update([dof(n, 0), dof(n, 1), dof(n, 2)])
+    # top vertical fijo
+    fixed.update([dof(3, 1), dof(4, 1)])
+
+    # B: d_full = B q, q = [u_top, th3, th4]
+    B = np.zeros((nd, 3), dtype=float)
+    B[dof(3, 0), 0] = 1.0
+    B[dof(4, 0), 0] = 1.0
+    B[dof(3, 2), 1] = 1.0
+    B[dof(4, 2), 2] = 1.0
+
+    # anula filas fixed en B
+    for r in fixed:
+        B[r, :] = 0.0
+
+    K_red = B.T @ K @ B
+    F_red = B.T @ F
+
+    q = np.linalg.solve(K_red, F_red)
+    u_top = float(q[0])
+    K0 = 1.0 / max(1e-30, u_top)
+
+    # Post: momentos y energías
+    d_full = B @ q
+
+    U_col = 0.0
+    U_tot = 0.0
+    M_col_bases = []
+    M_beam_ends = []
+
+    for (n1, n2, k_loc, T) in elem_info:
+        dofs = [
+            dof(n1, 0), dof(n1, 1), dof(n1, 2),
+            dof(n2, 0), dof(n2, 1), dof(n2, 2),
+        ]
+        d_g = d_full[dofs]
+        d_l = T @ d_g
+        f_l = k_loc @ d_l  # [N, N, Nm, N, N, Nm]
+        M1 = float(f_l[2])
+        M2 = float(f_l[5])
+
+        Ue = 0.5 * float(d_l @ (k_loc @ d_l))
+        U_tot += Ue
+
+        # columnas: n1 base, beam: n1,n2 son top
+        if (n1, n2) in [(1, 3), (2, 4)]:
+            U_col += Ue
+            M_col_bases.append(M1)
+        if (n1, n2) == (3, 4):
+            M_beam_ends.extend([M1, M2])
+
+    r_col = float(U_col / max(1e-30, U_tot))
+    m_col_base = float(max(abs(m) for m in M_col_bases))  # [Nm] por N
+    m_beam_end = float(max(abs(m) for m in M_beam_ends))  # [Nm] por N
+
+    return {
+        "K0": K0,
+        "m_col_base": m_col_base,
+        "m_beam_end": m_beam_end,
+        "r_col": r_col,
+    }
+
+
+# -------------------------
+# Restoring + snapshot/restore (agnóstico al tipo de elemento)
+# -------------------------
+def _snapshot(col: Element, beam: Element) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    return col.snapshot(), beam.snapshot()
+
+
+def _restore(col: Element, beam: Element, snap: Tuple[Dict[str, Any], Dict[str, Any]]) -> None:
+    col.restore(snap[0])
+    beam.restore(snap[1])
+
+
+def _eval_restoring(u_old: float, u_new: float, v_mid: float, dt: float, Kgeo: float, col: Element, beam: Element) -> float:
+    fcol = col.update_and_force(u_old, u_new, v_mid, dt)
+    fbeam = beam.update_and_force(u_old, u_new, v_mid, dt)
+    return float(fcol + fbeam - Kgeo * u_new)
+
+
+# -------------------------
+# Integradores
+# -------------------------
+def run_time_history_verlet(
     M: float,
     c: float,
     H: float,
-    col: ColEPP,
-    beam: BeamBoucWenDegrading,
+    col: Element,
+    beam: Element,
+    exc: Excitation,
     A_factor_g: float,
-    dt: float = 0.001,
-    tmax: float = 10.0,
-    drift_collapse: float = 0.10
-):
+    dt: float,
+    tmax: float,
+    drift_collapse: float = 0.10,
+    fp_iters: int = 4,
+    fp_tol: float = 1e-10,
+) -> Dict[str, Any]:
     n = int(tmax / dt) + 1
     t = np.linspace(0.0, tmax, n)
+
     u = np.zeros(n)
     v = np.zeros(n)
     a = np.zeros(n)
-    Vres = np.zeros(n)  # fuerza restauradora total (incluye P–Δ)
-    Fy_beam_hist = np.zeros(n)
-    K_beam_hist = np.zeros(n)
+    V = np.zeros(n)
 
     P_total = M * g
-    Kgeo = P_total / H  # rigidez geométrica (N/m) -> desestabiliza
+    Kgeo = P_total / H
 
-    # condición inicial
-    fcol = col.force_update(0.0)
-    fbeam = beam.update_and_force(0.0, 0.0, 0.0, dt)
-    fres = fcol + fbeam - Kgeo * 0.0
-    a[0] = (-c * v[0] - fres - M * ag(t[0], A_factor_g * g)) / M
-    Vres[0] = fres
-    Fy_beam_hist[0] = beam.Fy
-    K_beam_hist[0] = beam.K
+    # init
+    snap0 = _snapshot(col, beam)
+    R0 = _eval_restoring(0.0, 0.0, 0.0, dt, Kgeo, col, beam)
+    V[0] = R0
+    P0 = -M * exc.ag(float(t[0]), A_factor_g * g)
+    a[0] = (P0 - c * v[0] - R0) / M
 
     collapsed = False
     collapse_idx = None
 
     for i in range(n - 1):
-        # half-step velocity
+        # predictor
         v_half = v[i] + 0.5 * dt * a[i]
-        # update displacement
         u_new = u[i] + dt * v_half
 
-        # update hysteresis using (u[i] -> u_new, v_half)
-        fcol = col.force_update(u_new)
-        fbeam = beam.update_and_force(u[i], u_new, v_half, dt)
-        fres = fcol + fbeam - Kgeo * u_new
+        Pnp1 = -M * exc.ag(float(t[i + 1]), A_factor_g * g)
 
-        # compute new acceleration
-        a_new = (-c * v_half - fres - M * ag(t[i+1], A_factor_g * g)) / M
-        # complete velocity
+        # fixed-point: v_mid depende de a_new, pero a_new depende de R(u_new, v_mid)
+        snap_n = _snapshot(col, beam)
+        v_mid = v_half  # start
+
+        a_new = 0.0
+        v_new = 0.0
+        R_new = 0.0
+
+        for _ in range(fp_iters):
+            _restore(col, beam, snap_n)
+            R_try = _eval_restoring(u[i], u_new, v_mid, dt, Kgeo, col, beam)
+            # damping semi-implícito (v_{n+1} usa v_half)
+            a_try = (Pnp1 - c * v_half - R_try) / max(1e-30, (M + 0.5 * c * dt))
+            v_try = v_half + 0.5 * dt * a_try
+            v_mid_new = 0.5 * (v[i] + v_try)
+
+            if abs(v_mid_new - v_mid) <= fp_tol * max(1.0, abs(v_mid)):
+                a_new, v_new, R_new = float(a_try), float(v_try), float(R_try)
+                v_mid = float(v_mid_new)
+                break
+
+            a_new, v_new, R_new = float(a_try), float(v_try), float(R_try)
+            v_mid = float(v_mid_new)
+
+        # commit final con estado consistente a n
+        _restore(col, beam, snap_n)
+        R_new = _eval_restoring(u[i], u_new, v_mid, dt, Kgeo, col, beam)
+        a_new = (Pnp1 - c * v_half - R_new) / max(1e-30, (M + 0.5 * c * dt))
         v_new = v_half + 0.5 * dt * a_new
 
-        u[i+1] = u_new
-        v[i+1] = v_new
-        a[i+1] = a_new
-        Vres[i+1] = fres
-        Fy_beam_hist[i+1] = beam.Fy
-        K_beam_hist[i+1] = beam.K
+        u[i + 1] = u_new
+        v[i + 1] = v_new
+        a[i + 1] = a_new
+        V[i + 1] = R_new
 
-        if abs(u_new) / H >= drift_collapse and not collapsed:
+        if abs(u_new) / H >= drift_collapse:
             collapsed = True
             collapse_idx = i + 1
             break
 
-    if collapsed:
-        t = t[:collapse_idx+1]
-        u = u[:collapse_idx+1]
-        v = v[:collapse_idx+1]
-        a = a[:collapse_idx+1]
-        Vres = Vres[:collapse_idx+1]
-        Fy_beam_hist = Fy_beam_hist[:collapse_idx+1]
-        K_beam_hist = K_beam_hist[:collapse_idx+1]
+    if collapsed and collapse_idx is not None:
+        t = t[: collapse_idx + 1]
+        u = u[: collapse_idx + 1]
+        v = v[: collapse_idx + 1]
+        a = a[: collapse_idx + 1]
+        V = V[: collapse_idx + 1]
 
     return {
-        "t": t, "u": u, "v": v, "a": a,
-        "V": Vres,
-        "Fy_beam": Fy_beam_hist,
-        "K_beam": K_beam_hist,
+        "t": t, "u": u, "v": v, "a": a, "V": V,
+        "collapsed": collapsed,
+        "P_total": P_total,
+        "Kgeo": Kgeo,
+    }
+
+
+def run_time_history_hht(
+    M: float,
+    c: float,
+    H: float,
+    col: Element,
+    beam: Element,
+    exc: Excitation,
+    A_factor_g: float,
+    dt: float,
+    tmax: float,
+    drift_collapse: float = 0.10,
+    alpha_hht: float = -0.10,
+    newton_tol: float = 1e-8,
+    newton_max: int = 25,
+    fd_eps: float = 1e-6,
+) -> Dict[str, Any]:
+    """
+    HHT-α (Hilber–Hughes–Taylor) para amortiguamiento numérico HF.
+    α ∈ [-1/3, 0]. Newmark:
+      γ = 0.5 - α
+      β = (1-α)^2 / 4
+    """
+    if not (-1.0 / 3.0 <= alpha_hht <= 0.0):
+        raise ValueError("alpha_hht debe estar en [-1/3, 0].")
+
+    alpha = float(alpha_hht)
+    gamma = 0.5 - alpha
+    beta = (1.0 - alpha) ** 2 / 4.0
+
+    n = int(tmax / dt) + 1
+    t = np.linspace(0.0, tmax, n)
+
+    u = np.zeros(n)
+    v = np.zeros(n)
+    a = np.zeros(n)
+    V = np.zeros(n)
+
+    P_total = M * g
+    Kgeo = P_total / H
+
+    # init
+    snap0 = _snapshot(col, beam)
+    R0 = _eval_restoring(0.0, 0.0, 0.0, dt, Kgeo, col, beam)
+    V[0] = R0
+    P0 = -M * exc.ag(float(t[0]), A_factor_g * g)
+    a[0] = (P0 - c * v[0] - R0) / M
+
+    collapsed = False
+    collapse_idx = None
+
+    for i in range(n - 1):
+        tn = float(t[i])
+        tnp1 = float(t[i + 1])
+
+        Pn = -M * exc.ag(tn, A_factor_g * g)
+        Pnp1 = -M * exc.ag(tnp1, A_factor_g * g)
+        P_eff = (1.0 + alpha) * Pnp1 - alpha * Pn
+
+        Rn = float(V[i])
+
+        # predictores Newmark
+        u_pred = u[i] + dt * v[i] + dt ** 2 * (0.5 - beta) * a[i]
+        v_pred = v[i] + dt * (1.0 - gamma) * a[i]
+
+        u_guess = float(u_pred)
+
+        snap_n = _snapshot(col, beam)
+
+        for _it in range(newton_max):
+            a_guess = (u_guess - u_pred) / (beta * dt ** 2)
+            v_guess = v_pred + gamma * dt * a_guess
+            v_mid = 0.5 * (v[i] + v_guess)
+
+            _restore(col, beam, snap_n)
+            R_guess = _eval_restoring(u[i], u_guess, v_mid, dt, Kgeo, col, beam)
+
+            res = M * a_guess + c * v_guess + (1.0 + alpha) * R_guess - alpha * Rn - P_eff
+
+            scale = max(1.0, abs(P_eff) + abs((1.0 + alpha) * R_guess) + abs(M * a_guess))
+            if abs(res) <= newton_tol * scale:
+                break
+
+            du = fd_eps * max(1.0, abs(u_guess))
+            u2 = u_guess + du
+
+            a2 = (u2 - u_pred) / (beta * dt ** 2)
+            v2 = v_pred + gamma * dt * a2
+            v_mid2 = 0.5 * (v[i] + v2)
+
+            _restore(col, beam, snap_n)
+            R2 = _eval_restoring(u[i], u2, v_mid2, dt, Kgeo, col, beam)
+
+            res2 = M * a2 + c * v2 + (1.0 + alpha) * R2 - alpha * Rn - P_eff
+            dres = (res2 - res) / du
+
+            if abs(dres) < 1e-14:
+                # fallback estable
+                dres = (M / (beta * dt ** 2)) + (c * gamma / (beta * dt)) + (1.0 + alpha) * 1.0
+
+            step = res / dres
+
+            # limitador de paso
+            max_step = 0.25 * max(1e-6, abs(u_pred) + 1e-6)
+            step = float(np.clip(step, -max_step, max_step))
+            u_guess = u_guess - step
+
+        # commit n+1
+        _restore(col, beam, snap_n)
+        u_new = float(u_guess)
+        a_new = float((u_new - u_pred) / (beta * dt ** 2))
+        v_new = float(v_pred + gamma * dt * a_new)
+        v_mid = 0.5 * (v[i] + v_new)
+        R_new = _eval_restoring(u[i], u_new, v_mid, dt, Kgeo, col, beam)
+
+        u[i + 1] = u_new
+        v[i + 1] = v_new
+        a[i + 1] = a_new
+        V[i + 1] = R_new
+
+        if abs(u_new) / H >= drift_collapse:
+            collapsed = True
+            collapse_idx = i + 1
+            break
+
+    if collapsed and collapse_idx is not None:
+        t = t[: collapse_idx + 1]
+        u = u[: collapse_idx + 1]
+        v = v[: collapse_idx + 1]
+        a = a[: collapse_idx + 1]
+        V = V[: collapse_idx + 1]
+
+    return {
+        "t": t, "u": u, "v": v, "a": a, "V": V,
         "collapsed": collapsed,
         "P_total": P_total,
         "Kgeo": Kgeo,
@@ -541,239 +845,416 @@ def run_time_history(
 
 
 # -------------------------
-# MAIN
+# Plots: histéresis con gradiente temporal
 # -------------------------
-def main():
+def plot_hysteresis_time_gradient(x: np.ndarray, y: np.ndarray, t: np.ndarray, title: str) -> None:
+    fig, ax = plt.subplots()
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    t = np.asarray(t, float)
+
+    pts = np.column_stack([x, y]).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    norm = mpl.colors.Normalize(vmin=float(np.min(t)), vmax=float(np.max(t)))
+    lc = LineCollection(segs, cmap="plasma", norm=norm)
+    lc.set_array(t[:-1])
+    lc.set_linewidth(2.5)
+    ax.add_collection(lc)
+    ax.autoscale_view()
+    cbar = fig.colorbar(lc, ax=ax)
+    cbar.set_label("t [s]")
+    ax.set_title(title)
+    ax.grid(True)
+    return
+
+
+# -------------------------
+# Main (config + estudio)
+# -------------------------
+def build_excitation_from_env() -> Excitation:
+    exc = Excitation()
+    exc.type = _envs("EXC_TYPE", exc.type)
+    exc.sine_w1_hz = _envf("EXC_SINE_W1_HZ", exc.sine_w1_hz)
+    exc.sine_w2_hz = _envf("EXC_SINE_W2_HZ", exc.sine_w2_hz)
+    exc.sine_scale = _envf("EXC_SINE_SCALE", exc.sine_scale)
+
+    exc.shock_f0_hz = _envf("EXC_SHOCK_F0", exc.shock_f0_hz)
+    exc.shock_t0_s = _envf("EXC_SHOCK_T0", exc.shock_t0_s)
+    exc.shock_scale = _envf("EXC_SHOCK_SCALE", exc.shock_scale)
+
+    exc.combo_sine_scale = _envf("EXC_COMBO_SINE", exc.combo_sine_scale)
+    exc.combo_shock_scale = _envf("EXC_COMBO_SHOCK", exc.combo_shock_scale)
+
+    exc.file_path = _envs("EXC_FILE", exc.file_path)
+    exc.file_time_col = _envs("EXC_FILE_TIME", exc.file_time_col)
+    exc.file_acc_col = _envs("EXC_FILE_COL", exc.file_acc_col)
+    exc.file_units = _envs("EXC_FILE_UNITS", exc.file_units)
+    exc.file_scale = _envf("EXC_FILE_SCALE", exc.file_scale)
+    return exc
+
+
+def main() -> None:
+    # -------------------------
+    # Parámetros (puedes tunear por ENV)
     # -------------------------
     # Geometría pórtico
-    # -------------------------
-    H = 3.0   # m
-    L = 5.0   # m
-    T0 = 0.5  # s (objetivo)
+    H = _envf("H", 5.0)     # altura piso [m]
+    L = _envf("L", 6.0)     # luz [m]
 
-    # -------------------------
-    # Materiales (editables)
-    # -------------------------
-    # fy dado: 4.2 tonf/cm^2 -> 4.2 * 98.0665 MPa
-    fy_MPa = 4.2 * 98.0665
-    fy = fy_MPa * 1e6  # Pa
+    # Concreto/Acero (solo para prints; la capacidad My la dejamos por env)
+    Ec = _envf("EC_GPA", 23.5) * 1e9
+    fc_MPa = _envf("FC_MPA", 25.0)
+    fy_MPa = _envf("FY_MPA", 411.9)
 
-    # f'c no viene: pon tu valor
-    fc_MPa = 25.0
-    fc = fc_MPa * 1e6  # Pa
-    alpha = 0.85
+    # Secciones (para K0 lineal via FE)
+    # (valores default razonables; si ya los tienes en el script viejo, ajusta por ENV)
+    b_col = _envf("BCOL_M", 0.40)
+    h_col = _envf("HCOL_M", 0.40)
+    b_beam = _envf("BBEAM_M", 0.30)
+    h_beam = _envf("HBEAM_M", 0.50)
 
-    # módulo Ec (puedes fijarlo o usar fórmula)
-    Ec_MPa = 4700.0 * np.sqrt(fc_MPa)  # típica ACI, aprox.
-    Ec = Ec_MPa * 1e6
+    Ac = b_col * h_col
+    Ic = b_col * (h_col ** 3) / 12.0
+    Ab = b_beam * h_beam
+    Ib = b_beam * (h_beam ** 3) / 12.0
+    Eb = Ec  # mismo material
 
-    # -------------------------
-    # Secciones Problema 2 (suposición cover efectivo)
-    # -------------------------
-    cover = 0.06  # m (ajusta si tu pauta usa otro)
-    phi = 0.02    # m (Ø20)
+    # Periodo target para fijar masa
+    T0 = _envf("T0", 0.5)  # [s]
+    zeta = _envf("ZETA", 0.05)
 
-    # S1: 40x60, 4Ø20 arriba + 4Ø20 abajo
-    S1 = RCSectionSI(
-        name="S1_col_40x60",
-        b_m=0.40, h_m=0.60,
-        layers=(
-            RebarLayerSI(y_m_from_top=cover,        n_bars=4, phi_m=phi),
-            RebarLayerSI(y_m_from_top=0.60-cover,   n_bars=4, phi_m=phi),
-        ),
-    )
+    # Excitación
+    exc = build_excitation_from_env()
 
-    # S2: 25x50, 3Ø20 arriba + 2Ø20 abajo
-    S2 = RCSectionSI(
-        name="S2_beam_25x50",
-        b_m=0.25, h_m=0.50,
-        layers=(
-            RebarLayerSI(y_m_from_top=cover,        n_bars=3, phi_m=phi),
-            RebarLayerSI(y_m_from_top=0.50-cover,   n_bars=2, phi_m=phi),
-        ),
-    )
+    # Integración / estudio
+    dt = _envf("DT", 0.001)
+    tmax = _envf("TMAX", 10.0)
+    drift_collapse = _envf("DRIFT_COL", 0.10)
 
-    # -------------------------
-    # 1) Interacción N–M (polígonos)
-    # -------------------------
-    pts_col = sample_interaction_cloud_SI(S1, fc, fy, alpha=alpha, n_c=700)
-    hull_col = convex_hull_2d(pts_col)
+    DO_PLOTS = bool(_envi("DO_PLOTS", 1))
+    DO_STUDY = bool(_envi("DO_STUDY", 1))
+    DO_DT_SWEEP = bool(_envi("DO_DT_SWEEP", 1))
+    PLOT_EXC = bool(_envi("PLOT_EXC", 1))
 
-    pts_beam = sample_interaction_cloud_SI(S2, fc, fy, alpha=alpha, n_c=700)
-    hull_beam = convex_hull_2d(pts_beam)
+    # Modelo columnas: epp|bw
+    COL_MODEL = _envs("COL_MODEL", "epp").lower()
+    # Beam siempre BW (por ahora)
+    BEAM_MODEL = _envs("BEAM_MODEL", "bw").lower()
 
-    # Plot interacción
-    plt.figure()
-    plt.plot(pts_col[:, 1]/1e6, pts_col[:, 0]/1e3, ".", ms=1.5, alpha=0.25, label="nube col")
-    plt.plot(np.r_[hull_col[:,1]/1e6, hull_col[0,1]/1e6], np.r_[hull_col[:,0]/1e3, hull_col[0,0]/1e3], "-", lw=2, label="poligonal col")
-    plt.xlabel("M [MN·m]")
-    plt.ylabel("N [kN] (compresión +)")
-    plt.title("Interacción N–M — columnas (S1)")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
+    # My (en MNm) — deja defaults como los de tu output previo
+    My_col = _envf("MY_COL_MNM", 0.615) * 1e6
+    My_beam = _envf("MY_BEAM_MNM", 0.108) * 1e6
 
-    plt.figure()
-    plt.plot(pts_beam[:, 1]/1e6, pts_beam[:, 0]/1e3, ".", ms=1.5, alpha=0.25, label="nube viga")
-    plt.plot(np.r_[hull_beam[:,1]/1e6, hull_beam[0,1]/1e6], np.r_[hull_beam[:,0]/1e3, hull_beam[0,0]/1e3], "-", lw=2, label="poligonal viga")
-    plt.xlabel("M [MN·m]")
-    plt.ylabel("N [kN]")
-    plt.title("Interacción N–M — viga (S2)")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
+    # Plástico efectivo (momento por V): Lp y brazos eficaces
+    Lp_col = _envf("LP_COL_M", 0.55)
+    Lp_beam = _envf("LP_BEAM_M", 0.65)
 
-    # -------------------------
-    # 2) Rigidez elástica K0 del pórtico + coeficientes (M/V)
-    # -------------------------
-    K0, m_col_base, m_beam_end, r_col = portal_elastic_K0_and_moment_coeffs(Ec, S1, S2, H=H, L=L)
+    # Bouc–Wen params (comunes)
+    bw_alpha = _envf("BW_ALPHA", 0.05)
+    bw_beta = _envf("BW_BETA", 0.5)
+    bw_gamma = _envf("BW_GAMMA", 0.5)
+    bw_n = _envf("BW_N", 2.0)
+    bw_c_strength = _envf("BW_C_STRENGTH", 0.40)
+    bw_c_stiff = _envf("BW_C_STIFF", 0.20)
+    bw_eref_factor = _envf("BW_EREF_FACTOR", 1.0)  # multiplica Fy*uy
+
+    # HHT alpha values
+    HHT_ALPHAS = [None, -0.05, -0.10, -0.15]
+    # A barrido (g)
+    A_max = _envf("A_MAX_G", 0.8 if COL_MODEL == "bw" else 0.5)
+    A_step = _envf("A_STEP_G", 0.1)
+    A_list = np.arange(A_step, A_max + 1e-12, A_step)
+    A_ref = _envf("A_REF_G", 0.4)
+
+    # --------------------------------
+    # 1) Lineal FE para K0 y brazos
+    # --------------------------------
+    lin = portal_linear_response(H=H, L=L, Ec=Ec, Ac=Ac, Ic=Ic, Eb=Eb, Ab=Ab, Ib=Ib)
+    K0 = lin["K0"]
+    m_col_base = lin["m_col_base"]
+    m_beam_end = lin["m_beam_end"]
+    r_col = lin["r_col"]
 
     # Masa para T0
-    w0 = 2.0 * PI / T0
-    M = K0 / (w0**2)
+    w0 = 2.0 * math.pi / T0
+    M = K0 / (w0 ** 2)
 
-    # Axial en columnas (peso del piso repartido)
-    N0_col = 0.5 * M * g  # N
+    # Damping físico
+    c_scale = _envf("C_SCALE", 1.0)
+    c = 2.0 * c_scale * zeta * w0 * M
 
-    # Capacidades a momento desde interacción (en esa N0)
-    Mpos_col, Mneg_col = M_capacity_at_N(hull_col, N0_col)
-    if np.isnan(Mpos_col):
-        raise RuntimeError("N0_col queda fuera del polígono de la columna. Ajusta fc/Ec/cover o revisa la masa.")
+    # Axial por columna (solo print)
+    Peso = M * g
+    N0_col = 0.5 * Peso  # 2 columnas
 
-    My_col = min(abs(Mpos_col), abs(Mneg_col))  # (simétrica, pero usamos min por robustez)
+    # brazos efectivos
+    m_col_eff = m_col_base - 0.5 * Lp_col
+    m_beam_eff = m_beam_end - 0.5 * Lp_beam
 
-    # Para viga: N≈0
-    Mpos_beam, Mneg_beam = M_capacity_at_N(hull_beam, 0.0)
-    if np.isnan(Mpos_beam):
-        raise RuntimeError("N=0 queda fuera del polígono de la viga (raro). Revisa nube/hull.")
-    # viga asimétrica -> usar capacidad conservadora (menor |M|)
-    My_beam = min(abs(Mpos_beam), abs(Mneg_beam))
-
-    # Convertir a cortantes equivalentes usando momentos por unit shear
-    Vy_col = My_col / (m_col_base + 1e-30)
-    Vy_beam = My_beam / (m_beam_end + 1e-30)
-
-    # Primer yield global (aprox)
+    # cortantes de fluencia (a nivel SDOF)
+    Vy_col = My_col / max(1e-30, m_col_eff)
+    Vy_beam = My_beam / max(1e-30, m_beam_eff)
     Vy_first = min(Vy_col, Vy_beam)
-    uy_first = Vy_first / K0
-    # Partición de rigidez en paralelo (más física): por energía elástica FEM (caso V=1 N)
-    # r_col viene de portal_elastic_K0_and_moment_coeffs()
-    Kc = max(r_col * K0, 0.05 * K0)
-    Kb = max((1.0 - r_col) * K0, 0.05 * K0)
-    # Renormaliza para asegurar Kc + Kb = K0 exactamente
-    s = Kc + Kb
-    Kc *= K0 / (s + 1e-30)
-    Kb *= K0 / (s + 1e-30)
+    uy_first = Vy_first / max(1e-30, K0)
 
-    # Amortiguamiento 5% en T0
-    zeta = 0.05
-    c = 2.0 * zeta * w0 * M
+    Kc = r_col * K0
+    Kb = (1.0 - r_col) * K0
 
     print("\n=== Calibración elástica / capacidades ===")
     print(f"Ec = {Ec/1e9:.2f} GPa (aprox), fc'={fc_MPa:.1f} MPa, fy={fy_MPa:.1f} MPa")
     print(f"K0 = {K0/1e6:.2f} MN/m")
-    print(f"M (para T0=0.5s) = {M:.0f} kg  -> Peso = {M*g/1e3:.1f} kN")
+    print(f"M (para T0={T0:.2f}s) = {M:.0f} kg  -> Peso = {Peso/1e3:.1f} kN")
     print(f"N0 por columna = {N0_col/1e3:.1f} kN")
     print(f"My_col(N0) = {My_col/1e6:.3f} MN·m | My_beam(N≈0) = {My_beam/1e6:.3f} MN·m")
     print(f"m_col_base = {m_col_base:.3f} m  | m_beam_end = {m_beam_end:.3f} m  (momento por 1N de V)")
+    print(f"Lp_col={Lp_col:.3f} m, Lp_beam={Lp_beam:.3f} m | m_col_eff={m_col_eff:.3f} m, m_beam_eff={m_beam_eff:.3f} m")
     print(f"Vy_col = {Vy_col/1e3:.1f} kN | Vy_beam = {Vy_beam/1e3:.1f} kN")
-    print(f"Vy_first = {Vy_first/1e3:.1f} kN -> uy_first={uy_first*1000:.2f} mm")
+    print(f"Vy_first = {Vy_first/1e3:.1f} kN -> uy_first={uy_first*1e3:.2f} mm")
     print(f"Partición (energía FEM): r_col={r_col:.2f} -> Kc={Kc/K0:.2f} K0, Kb={Kb/K0:.2f} K0")
-    print(f"Damping c = {c:.2e} N·s/m (ζ=5% en T0)")
+    print(f"Damping c = {c:.2e} N·s/m (ζ={zeta*100:.0f}% en T0)")
 
-    # -------------------------
-    # 3) Barrido de amplitudes A = 0.1g, 0.2g, ...
-    # -------------------------
-    dt = 0.001
-    tmax = 10.0
-    drift_collapse = 0.10
+    if PLOT_EXC and DO_PLOTS:
+        plot_excitation(exc, A_ref, dt, tmax)
 
-    A_list = np.arange(0.1, 2.1, 0.1)  # hasta 2.0g o colapso
-    results = []
-    collapsed_at = None
+    # f_cut para ringing: por defecto 4*f1
+    f1 = 1.0 / T0
+    f_cut = _envf("F_CUT_HZ", 4.0 * f1)
 
-    for A in A_list:
-        col = ColEPP(K=Kc, Fy=Vy_col)
-        beam = BeamBoucWenDegrading(
-            K0=Kb, Fy0=Vy_beam,
-            alpha=0.05, beta=0.5, gamma=0.5, n=2.0,
-            c_strength=0.40, c_stiff=0.20
-        )
+    # --------------------------------
+    # 2) Fabricar elementos (cols + beam)
+    # --------------------------------
+    def make_columns() -> Element:
+        if COL_MODEL == "bw":
+            # 2 columnas en paralelo: cada una con Kc/2 y Fy/2
+            k_each = 0.5 * Kc
+            fy_each = 0.5 * Vy_col
+            uy0 = fy_each / max(1e-30, k_each)
+            e_ref = bw_eref_factor * fy_each * uy0
+            s1 = BoucWenDegrading(k_each, fy_each, alpha=bw_alpha, beta=bw_beta, gamma=bw_gamma, n=bw_n,
+                                 c_strength=bw_c_strength, c_stiff=bw_c_stiff, e_ref=e_ref)
+            s2 = BoucWenDegrading(k_each, fy_each, alpha=bw_alpha, beta=bw_beta, gamma=bw_gamma, n=bw_n,
+                                 c_strength=bw_c_strength, c_stiff=bw_c_stiff, e_ref=e_ref)
+            return Parallel([s1, s2])
+        # default: EPP
+        return EPP(Kc, Vy_col)
 
-        out = run_time_history(
-            K0=K0, M=M, c=c, H=H,
-            col=col, beam=beam,
-            A_factor_g=A,
-            dt=dt, tmax=tmax,
-            drift_collapse=drift_collapse
-        )
+    def make_beam() -> Element:
+        if BEAM_MODEL == "epp":
+            return EPP(Kb, Vy_beam)
+        uy0 = Vy_beam / max(1e-30, Kb)
+        e_ref = bw_eref_factor * Vy_beam * uy0
+        return BoucWenDegrading(Kb, Vy_beam, alpha=bw_alpha, beta=bw_beta, gamma=bw_gamma, n=bw_n,
+                                c_strength=bw_c_strength, c_stiff=bw_c_stiff, e_ref=e_ref)
 
-        drift_max = np.max(np.abs(out["u"])) / H
-        results.append((A, drift_max, out["collapsed"]))
+    # --------------------------------
+    # 3) Study: comparar Verlet vs HHT-α
+    # --------------------------------
+    if DO_STUDY:
+        print("\n=== Estudio paramétrico (Verlet vs HHT-α) ===")
 
-        print(f"A={A:.1f}g -> drift_max={100*drift_max:.2f}%  {'(COLAPSO)' if out['collapsed'] else ''}")
+        results = []  # list of dicts
 
-        if out["collapsed"]:
-            collapsed_at = A
-            last_out = out
-            break
-        last_out = out
+        for a_hht in HHT_ALPHAS:
+            tag = "Verlet" if a_hht is None else f"HHT a={a_hht:.2f}"
+            for A in A_list:
+                col = make_columns()
+                beam = make_beam()
 
-    results = np.array(results, dtype=float)
+                t0 = time.perf_counter()
+                if a_hht is None:
+                    out = run_time_history_verlet(M=M, c=c, H=H, col=col, beam=beam, exc=exc,
+                                                  A_factor_g=float(A), dt=dt, tmax=tmax,
+                                                  drift_collapse=drift_collapse)
+                else:
+                    out = run_time_history_hht(M=M, c=c, H=H, col=col, beam=beam, exc=exc,
+                                               A_factor_g=float(A), dt=dt, tmax=tmax,
+                                               drift_collapse=drift_collapse, alpha_hht=float(a_hht))
+                cpu = time.perf_counter() - t0
 
-    # -------------------------
-    # Plots resumen
-    # -------------------------
-    plt.figure()
-    plt.plot(results[:,0], 100*results[:,1], "-o")
-    plt.xlabel("Amplitud A [g]")
-    plt.ylabel("Deriva máxima [%]")
-    plt.title("Curva incremental (IDA) simplificada — pórtico 1 piso")
-    plt.grid(True, alpha=0.3)
+                drift = float(np.max(np.abs(out["u"])) / H)
+                hf_u = hf_ratio(out["u"], dt, f_cut)
+                hf_a = hf_ratio(out["a"], dt, f_cut)
+                hf_V = hf_ratio(out["V"], dt, f_cut)
+                roughV = roughness_second_diff(out["V"])
+                jerk = jerk_rms(out["a"], dt)
 
-    # Plot del último run (colapso o el mayor A sin colapso)
-    t = last_out["t"]
-    u = last_out["u"]
-    V = last_out["V"]
-    Fy_b = last_out["Fy_beam"]
-    K_b = last_out["K_beam"]
+                rec = {
+                    "method": tag,
+                    "alpha": a_hht,
+                    "A_g": float(A),
+                    "drift": drift,
+                    "hf_u": hf_u,
+                    "hf_a": hf_a,
+                    "hf_V": hf_V,
+                    "roughV": roughV,
+                    "jerk": jerk,
+                    "cpu_s": cpu,
+                    "collapsed": bool(out["collapsed"]),
+                    "out": out,
+                }
+                results.append(rec)
 
-    plt.figure()
-    plt.plot(t, u*1000)
-    plt.xlabel("t [s]")
-    plt.ylabel("u [mm]")
-    plt.title(f"Historia u(t) — A={results[-1,0]:.1f}g" + (" (colapso)" if last_out["collapsed"] else ""))
-    plt.grid(True, alpha=0.3)
+                coltxt = "  (COLAPSO)" if out["collapsed"] else ""
+                print(f"[{tag}] A={A:.1f}g  drift={drift*100:5.2f}%"
+                      f"  hf_u={hf_u:9.3e}  hf_a={hf_a:9.3e}  hf_V={hf_V:9.3e}"
+                      f"  roughV={roughV:8.2e}  jerk={jerk:8.2e}  cpu={cpu:5.2f}s{coltxt}")
 
-    fig, ax = plt.subplots()
-    plot_hysteresis_time_gradient(u, V/1e3, t, ax=ax, cmap="plasma", lw=2.5, cbar_label="t [s]")
-    ax.set_xlabel("u [m]")
-    ax.set_ylabel("V_restaurador [kN]")
-    ax.set_title(f"Histeresis V–u (gradiente temporal) — A={results[-1,0]:.1f}g")
-    ax.grid(True, alpha=0.3)
-    plt.figure()
-    plt.plot(t, Fy_b/1e3, label="Fy_beam")
-    plt.plot(t, K_b/1e6, label="K_beam")
-    plt.xlabel("t [s]")
-    plt.ylabel("Fy [kN] / K [MN/m]")
-    plt.title("Degradación viga (SHM Bouc–Wen) en el último run")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
+        # Resumen colapso
+        print("\n=== Resumen colapso (criterio deriva %.1f%%) ===" % (drift_collapse * 100))
+        for a_hht in HHT_ALPHAS:
+            tag = "Verlet" if a_hht is None else f"HHT a={a_hht:.2f}"
+            Acol = None
+            for rec in results:
+                if rec["method"] == tag and rec["collapsed"]:
+                    Acol = rec["A_g"]
+                    break
+            if Acol is None:
+                print(f"{tag:>12}: no colapsa en barrido hasta A={A_max:.1f}g")
+            else:
+                print(f"{tag:>12}: colapsa en A≈{Acol:.1f}g")
 
-    # Ground motion del último run (en g)
-    plt.figure()
-    a_g = np.array([ag(tt, results[-1,0]*g) for tt in t])
-    plt.plot(t, a_g/g)
-    plt.xlabel("t [s]")
-    plt.ylabel("a_g [g]")
-    plt.title("Entrada sísmica seno-modulada (último run)")
-    plt.grid(True, alpha=0.3)
+        # --------------------------------
+        # Plots comparativos en A_ref
+        # --------------------------------
+        if DO_PLOTS:
+            # extrae outputs en A_ref
+            outs_Aref = {}
+            for a_hht in HHT_ALPHAS:
+                tag = "Verlet" if a_hht is None else f"HHT a={a_hht:.2f}"
+                # busca el registro más cercano a A_ref
+                cand = [r for r in results if r["method"] == tag]
+                idx = int(np.argmin([abs(r["A_g"] - A_ref) for r in cand]))
+                outs_Aref[tag] = cand[idx]["out"]
 
-    if collapsed_at is not None:
-        print(f"\n>>> Colapso (criterio deriva {100*drift_collapse:.1f}%) alcanzado en A ≈ {collapsed_at:.1f}g")
-    else:
-        print(f"\n>>> No colapsó hasta A={results[-1,0]:.1f}g con el criterio deriva {100*drift_collapse:.1f}%")
+            # u(t)
+            plt.figure()
+            for tag, out in outs_Aref.items():
+                plt.plot(out["t"], out["u"], label=tag)
+            plt.grid(True)
+            plt.xlabel("t [s]")
+            plt.ylabel("u [m]")
+            plt.title(f"Comparación u(t) en A_ref={A_ref:.1f}g")
+            plt.legend()
 
-    plt.show()
+            # V-u overlay
+            plt.figure()
+            for tag, out in outs_Aref.items():
+                plt.plot(out["u"], out["V"] / 1e3, label=tag)  # kN
+            plt.grid(True)
+            plt.xlabel("u [m]")
+            plt.ylabel("V [kN]")
+            plt.title(f"Comparación V-u en A_ref={A_ref:.1f}g (overlay)")
+            plt.legend()
+
+            # time gradient (solo uno)
+            outg = outs_Aref.get("HHT a=-0.10", list(outs_Aref.values())[0])
+            plot_hysteresis_time_gradient(outg["u"], outg["V"] / 1e3, outg["t"],
+                                          title=f"Histeresis V-u (gradiente) — {('HHT a=-0.10' if 'HHT a=-0.10' in outs_Aref else 'case')} — A_ref={A_ref:.1f}g")
+            plt.xlabel("u [m]")
+            plt.ylabel("V_restaurador [kN]")
+
+        # --------------------------------
+        # 4) Barrido dt (para que HHT muestre ventaja en HF cuando dt crece)
+        # --------------------------------
+        if DO_DT_SWEEP:
+            dt_list = [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]
+            print(f"\n=== Barrido dt | f_cut={f_cut:.2f} Hz (≈4·f1) ===")
+
+            for c_test, c_tag, A_dt in [(c, "c=phys", A_ref), (0.0, "c=0", 0.25)]:
+                print(f"\n--- {c_tag} (A={A_dt:.2f}g) ---")
+                print("\nVerlet:")
+                print("  dt [s] | drift[%] | hf_a[e] | hf_V[e] | roughV | jerk")
+                print("  -------+----------+---------+---------+--------+------")
+
+                lines = {}
+
+                for a_hht in HHT_ALPHAS:
+                    tag = "Verlet" if a_hht is None else f"HHT a={a_hht:.2f}"
+                    lines[tag] = {"dt": [], "hf_a": [], "hf_V": []}
+
+                for dt2 in dt_list:
+                    # Verlet
+                    col = make_columns()
+                    beam = make_beam()
+                    out = run_time_history_verlet(M=M, c=c_test, H=H, col=col, beam=beam, exc=exc,
+                                                  A_factor_g=float(A_dt), dt=float(dt2), tmax=tmax,
+                                                  drift_collapse=drift_collapse)
+                    drift = float(np.max(np.abs(out["u"])) / H)
+                    hf_a_ = hf_ratio(out["a"], float(dt2), f_cut)
+                    hf_V_ = hf_ratio(out["V"], float(dt2), f_cut)
+                    roughV = roughness_second_diff(out["V"])
+                    jerk = jerk_rms(out["a"], float(dt2))
+                    coltxt = "  *COL*" if out["collapsed"] else ""
+                    print(f"  {dt2:7.4f} | {drift*100:8.2f} | {hf_a_:7.3e} | {hf_V_:7.3e} | {roughV:6.1e} | {jerk:4.1e}{coltxt}")
+                    lines["Verlet"]["dt"].append(dt2)
+                    lines["Verlet"]["hf_a"].append(hf_a_)
+                    lines["Verlet"]["hf_V"].append(hf_V_)
+
+                    # HHTs
+                    for a_hht in [-0.05, -0.10, -0.15]:
+                        col = make_columns()
+                        beam = make_beam()
+                        out = run_time_history_hht(M=M, c=c_test, H=H, col=col, beam=beam, exc=exc,
+                                                   A_factor_g=float(A_dt), dt=float(dt2), tmax=tmax,
+                                                   drift_collapse=drift_collapse, alpha_hht=float(a_hht))
+                        hf_a_ = hf_ratio(out["a"], float(dt2), f_cut)
+                        hf_V_ = hf_ratio(out["V"], float(dt2), f_cut)
+                        tag = f"HHT a={a_hht:.2f}"
+                        lines[tag]["dt"].append(dt2)
+                        lines[tag]["hf_a"].append(hf_a_)
+                        lines[tag]["hf_V"].append(hf_V_)
+
+                if DO_PLOTS:
+                    # HF en a(t)
+                    plt.figure()
+                    for tag, d in lines.items():
+                        plt.plot(d["dt"], d["hf_a"], marker="o", label=tag)
+                    plt.grid(True)
+                    plt.xlabel("dt [s]")
+                    plt.ylabel(f"HF_ratio a(t), f>{f_cut:.1f} Hz")
+                    plt.title(f"Sensibilidad dt (A={A_dt:.1f}g) — {c_tag} — ringing en a(t)")
+                    plt.legend()
+
+                    # HF en V(t)
+                    plt.figure()
+                    for tag, d in lines.items():
+                        plt.plot(d["dt"], d["hf_V"], marker="o", label=tag)
+                    plt.grid(True)
+                    plt.xlabel("dt [s]")
+                    plt.ylabel(f"HF_ratio V(t), f>{f_cut:.1f} Hz")
+                    plt.title(f"Sensibilidad dt (A={A_dt:.1f}g) — {c_tag} — ringing en V(t)")
+                    plt.legend()
+
+    if DO_PLOTS:
+        plt.show()
 
 
 if __name__ == "__main__":
     main()
+
+
+"""
+COMANDOS ÚTILES (terminal)
+
+# 1) Caso base (seno)
+python3 portico_shm.py
+
+# 2) Shock (choque) — ajusta frecuencia y tiempo del pico
+EXC_TYPE=shock EXC_SHOCK_F0=25 EXC_SHOCK_T0=0.2 A_REF_G=0.4 python3 portico_shm.py
+
+# 3) Combo seno + choque
+EXC_TYPE=combo EXC_COMBO_SHOCK=0.7 EXC_SHOCK_T0=0.4 python3 portico_shm.py
+
+# 4) Importar aceleración de CSV (p.ej. resultados tren)
+#   - Usa Time_s y Acceleration_g (en g) desde tu results (1).csv
+EXC_TYPE=file EXC_FILE="results (1).csv" EXC_FILE_TIME=Time_s EXC_FILE_COL=Acceleration_g EXC_FILE_UNITS=g A_REF_G=0.4 python3 portico_shm.py
+
+# 5) Cambiar modelo columnas a Bouc–Wen (2 columnas en paralelo)
+COL_MODEL=bw python3 portico_shm.py
+
+# 6) Desactivar plots / estudios
+DO_PLOTS=0 DO_STUDY=0 python3 portico_shm.py
+
+# 7) Ajustar paso de tiempo / dt sweep
+DT=0.002 DO_DT_SWEEP=1 python3 portico_shm.py
+"""
