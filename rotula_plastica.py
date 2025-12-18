@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Problema 2 (N–M–V): Secciones RC con acero perfectamente plástico y hormigón solo a compresión.
+(N–M–V): Secciones RC con acero perfectamente plástico y hormigón solo a compresión.
 - Calcula curvas de interacción N–M (y opcionalmente prisma N–M–V).
 - Construye superficie de fluencia como casco convexo (polígono) en (N,M).
 - Implementa modelo elasto-plástico en resultantes (N,M) con flujo asociado (return mapping a polígono).
@@ -20,6 +20,28 @@ from dataclasses import dataclass
 import numpy as np
 import matplotlib.pyplot as plt
 
+
+from matplotlib.collections import LineCollection
+import matplotlib as mpl
+
+def plot_hysteresis_time_gradient(x, y, t, ax=None, cmap="plasma", lw=2.5, cbar_label="t [s]"):
+    """
+    Dibuja y(x) coloreado por tiempo t usando LineCollection (gradiente temporal).
+    """
+    if ax is None:
+        ax = plt.gca()
+    x = np.asarray(x); y = np.asarray(y); t = np.asarray(t)
+    pts = np.column_stack([x, y]).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    norm = mpl.colors.Normalize(vmin=float(t.min()), vmax=float(t.max()))
+    lc = LineCollection(segs, cmap=cmap, norm=norm)
+    lc.set_array(t[:-1])
+    lc.set_linewidth(lw)
+    ax.add_collection(lc)
+    ax.autoscale_view()
+    cbar = plt.colorbar(lc, ax=ax)
+    cbar.set_label(cbar_label)
+    return ax
 
 # -------------------------
 # Utilidades de unidades
@@ -332,9 +354,12 @@ def plot_interaction(sec: RCSection, pts: np.ndarray, hull: np.ndarray):
     plt.legend()
     plt.grid(True, alpha=0.3)
 
-def plot_cyclic(title: str, eps0, kappa, N, M, Wp):
-    plt.figure()
-    plt.plot(M / 100.0, N, "-", linewidth=1.5)
+def plot_cyclic(title: str, eps0, kappa, N, M, Wp, t_hist=None):
+    fig, ax = plt.subplots()
+    if t_hist is None:
+        ax.plot(M / 100.0, N, "-", linewidth=1.5)
+    else:
+        plot_hysteresis_time_gradient(M / 100.0, N, t_hist, ax=ax, cmap="plasma", lw=2.5, cbar_label="t")
     plt.axhline(0, linewidth=0.8)
     plt.axvline(0, linewidth=0.8)
     plt.xlabel("M [tonf·m]")
@@ -342,15 +367,15 @@ def plot_cyclic(title: str, eps0, kappa, N, M, Wp):
     plt.title(f"{title} — trayectoria en N–M")
     plt.grid(True, alpha=0.3)
 
-    plt.figure()
-    plt.plot(kappa, M / 100.0, "-", linewidth=1.5)
+    fig, ax = plt.subplots()
+    plot_hysteresis_time_gradient(kappa, M / 100.0, t_hist, ax=ax, cmap="viridis", lw=2.5, cbar_label="t")
     plt.xlabel("κ [1/cm]")
     plt.ylabel("M [tonf·m]")
     plt.title(f"{title} — histéresis M–κ")
     plt.grid(True, alpha=0.3)
 
-    plt.figure()
-    plt.plot(eps0, N, "-", linewidth=1.5)
+    fig, ax = plt.subplots()
+    plot_hysteresis_time_gradient(eps0, N, t_hist, ax=ax, cmap="cividis", lw=2.5, cbar_label="t")
     plt.xlabel("ε0 [-]")
     plt.ylabel("N [tonf]")
     plt.title(f"{title} — histéresis N–ε0")
@@ -454,8 +479,7 @@ def main():
             ("C (sesgo axial + flexión)", eps0_C, kappa_C),
         ]:
             out = simulate_cyclic_NM(hull, EA, EI, eps0_hist, kappa_hist)
-            plot_cyclic(f"{sec.name} — {tag}", eps0_hist, kappa_hist, out["N"], out["M"], out["Wp"])
-
+            plot_cyclic(f"{sec.name} — {tag}", eps0_hist, kappa_hist, out["N"], out["M"], out["Wp"], t_hist=t)
     plt.show()
 
 
