@@ -10,7 +10,7 @@ Modelo (estable numéricamente):
       * Viga: 2 (extremos) = 2 (SHM M–θ con degradación simple).
   - Excitación: a_g(t)=A*cos(0.2*pi*t)*sin(4*pi*t), t<=10 s.
   - **IDA**: A = 0.1g, 0.2g, ... hasta colapso por drift.
-  - **Colapso por drift**: 4%.
+  - **Colapso por drift**: 10% (snapshot/etiquetas a 4%).
   - Postproceso: histeresis con gradiente temporal, N–M (±M), balance de energía y sensibilidad en dt.
 
 Notas importantes:
@@ -151,18 +151,28 @@ def plot_structure_states(model: Model, last: Dict[str, np.ndarray], drift_heigh
 # -----------------------------
 # Diagnostics helpers
 # -----------------------------
-def format_snapshot(last: Dict[str, np.ndarray], drift_limit: float, extra: Optional[Dict[str, float]] = None) -> str:
+def format_snapshot(
+    last: Dict[str, np.ndarray],
+    drift_limit: float,
+    snapshot_limit: Optional[float] = None,
+    extra: Optional[Dict[str, float]] = None,
+) -> str:
     """Small multiline text block to embed in plots."""
     g = 9.81
     t = last.get("t", np.array([], dtype=float))
     drift = last.get("drift", np.array([], dtype=float))
     Vb = last.get("Vb", np.array([], dtype=float))
 
+    snapshot_limit = drift_limit if snapshot_limit is None else snapshot_limit
+
     pk_drift = float(np.max(np.abs(drift))) if drift.size else float("nan")
     pk_vb = float(np.max(np.abs(Vb))) if Vb.size else float("nan")
 
     idxc = np.where(np.abs(drift) >= drift_limit)[0] if drift.size else np.array([], dtype=int)
     tc = float(t[int(idxc[0])]) if (isinstance(t, np.ndarray) and t.size and idxc.size) else float("nan")
+
+    idxs = np.where(np.abs(drift) >= snapshot_limit)[0] if drift.size else np.array([], dtype=int)
+    ts = float(t[int(idxs[0])]) if (isinstance(t, np.ndarray) and t.size and idxs.size) else float("nan")
 
     it = last.get("iters", np.array([], dtype=int))
     it_max = int(np.max(it)) if isinstance(it, np.ndarray) and it.size else 0
@@ -183,12 +193,15 @@ def format_snapshot(last: Dict[str, np.ndarray], drift_limit: float, extra: Opti
         f"T0 ≈ {T0:.3f} s, ζ = {zeta:.3f}",
         f"HHT-α: α={alpha:+.3f}, ρ∞={rho_inf:.3f}",
         f"γ={gamma:.3f}, β={beta:.3f}",
-        f"Peak drift = {100*pk_drift:.2f}%  (limit {100*drift_limit:.2f}%)",
+        f"Peak drift = {100*pk_drift:.2f}%  (colapso {100*drift_limit:.2f}%)",
+        f"Snapshot drift = {100*snapshot_limit:.2f}%",
         f"Peak Vb = {pk_vb/1e3:.1f} kN",
         f"Newton iters: max={it_max}, mean={it_mean:.1f}",
     ]
     if idxc.size:
         lines.append(f"Collapse @ t={tc:.3f}s")
+    if idxs.size:
+        lines.append(f"Snapshot @ t={ts:.3f}s")
     if extra:
         for k, v in extra.items():
             try:
@@ -322,12 +335,13 @@ def compute_energy_balance(last: Dict[str, np.ndarray], model: Model) -> Dict[st
     }
 
 
-def plot_energy_balance(last: Dict[str, np.ndarray], model: Model, drift_limit: float):
+def plot_energy_balance(last: Dict[str, np.ndarray], model: Model, drift_limit: float, snapshot_limit: Optional[float] = None):
     eb = compute_energy_balance(last, model)
 
     snap = format_snapshot(
         last,
         drift_limit,
+        snapshot_limit=snapshot_limit,
         extra={
             "Final |resid|/|Wext|max [%]": float(np.abs(eb["resid_pct"][-1])) if eb["resid_pct"].size else float("nan")
         },
@@ -379,7 +393,7 @@ def plot_energy_balance(last: Dict[str, np.ndarray], model: Model, drift_limit: 
 
 def dt_sensitivity_analysis(H=3.0, L=5.0, T0=0.5, zeta=0.02,
                             A_g: float = 0.20,
-                            drift_limit: float = 0.04,
+                            drift_limit: float = 0.10,
                             alpha: float = -0.05,
                             t_end: float = 3.0,
                             dts: Tuple[float, ...] = (0.004, 0.002, 0.001, 0.0005)):
@@ -1250,7 +1264,7 @@ def ag_fun(t: np.ndarray, A: float) -> np.ndarray:
 
 
 def run_incremental_amplitudes(H=3.0, L=5.0, T0=0.5, zeta=0.02,
-                               drift_limit=0.04,
+                               drift_limit=0.10,
                                amps_g=np.arange(0.1, 2.1, 0.1),
                                t_end=10.0,
                                base_dt=0.002,
@@ -1307,7 +1321,13 @@ def run_incremental_amplitudes(H=3.0, L=5.0, T0=0.5, zeta=0.02,
     return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
 
 
-def plot_results(last: Dict[str, np.ndarray], model: Model, meta: Dict, drift_limit: float = 0.04):
+def plot_results(
+    last: Dict[str, np.ndarray],
+    model: Model,
+    meta: Dict,
+    drift_limit: float = 0.10,
+    snapshot_limit: Optional[float] = None,
+):
     """Generate all standard plots for the last successful IDA run."""
     if last is None:
         return
@@ -1316,7 +1336,10 @@ def plot_results(last: Dict[str, np.ndarray], model: Model, meta: Dict, drift_li
     drift = last.get("drift", np.array([], dtype=float))
     Vb = last.get("Vb", np.array([], dtype=float))
     ag = last.get("ag", np.array([], dtype=float))
-    snap = format_snapshot(last, drift_limit)
+    snap = format_snapshot(last, drift_limit, snapshot_limit=snapshot_limit)
+
+    if snapshot_limit is None:
+        snapshot_limit = drift_limit
 
     # --- State plots (members + hinges) ---
     try:
@@ -1342,12 +1365,20 @@ def plot_results(last: Dict[str, np.ndarray], model: Model, meta: Dict, drift_li
         fig, ax = plt.subplots()
         ax.plot(t, 100.0 * drift)
         idxc = np.where(np.abs(drift) >= drift_limit)[0]
+        idxs = np.where(np.abs(drift) >= snapshot_limit)[0]
         if idxc.size:
             tc = float(t[int(idxc[0])])
             ax.axvline(tc, linestyle=":", linewidth=1.2)
             ax.text(tc, 0.0, f" t_collapse={tc:.3f}s", rotation=90, va="bottom", fontsize=8)
         ax.axhline(100.0 * drift_limit, linestyle="--")
         ax.axhline(-100.0 * drift_limit, linestyle="--")
+        if snapshot_limit != drift_limit:
+            ax.axhline(100.0 * snapshot_limit, linestyle=":", color="0.4", linewidth=1.2)
+            ax.axhline(-100.0 * snapshot_limit, linestyle=":", color="0.4", linewidth=1.2)
+        if idxs.size:
+            ts = float(t[int(idxs[0])])
+            ax.axvline(ts, linestyle=":", linewidth=1.0, color="0.4")
+            ax.text(ts, 0.0, f" t_snapshot={ts:.3f}s", rotation=90, va="top", fontsize=7)
         ax.set_xlabel("t [s]")
         ax.set_ylabel("drift [%]")
         ax.grid(True)
@@ -1361,9 +1392,7 @@ def plot_results(last: Dict[str, np.ndarray], model: Model, meta: Dict, drift_li
         fig, ax = plt.subplots()
         x = 100.0 * drift
         y = Vb / 1e3  # kN
-        lc = colored_line(x, y, t)
-        ax.add_collection(lc)
-        ax.autoscale()
+        lc = colored_line(ax, x, y, t)
         ax.set_xlabel("drift [%]")
         ax.set_ylabel("V_base [kN]")
         ax.grid(True)
@@ -1393,9 +1422,7 @@ def plot_results(last: Dict[str, np.ndarray], model: Model, meta: Dict, drift_li
                 fig, ax = plt.subplots()
                 x = theta[:, hid]
                 y = M[:, hid] / 1e3  # kNm
-                lc = colored_line(x, y, tt)
-                ax.add_collection(lc)
-                ax.autoscale()
+                lc = colored_line(ax, x, y, tt)
                 ax.set_xlabel("θ_rel [rad]")
                 ax.set_ylabel("M [kNm]")
                 ax.set_title(f"Beam hinge H{hid}: M–θ (color=time)")
@@ -1437,8 +1464,7 @@ def plot_results(last: Dict[str, np.ndarray], model: Model, meta: Dict, drift_li
                     Nref = float(Nrefs[idx_i]) if isinstance(Nrefs, (list, tuple, np.ndarray)) and idx_i < len(Nrefs) else float(meta.get("N_ref", 0.0))
                     x = np.full_like(tt, Nref/1e3, dtype=float)
                     y = Mhist[:, hid] / 1e3
-                    last_lc = colored_line(x, y, tt)
-                    ax.add_collection(last_lc)
+                    last_lc = colored_line(ax, x, y, tt)
                     ax.text(x[0], y[0], f"H{hid}", fontsize=8, ha="left", va="bottom")
                 ax.autoscale()
                 if last_lc is not None:
@@ -1459,11 +1485,11 @@ def plot_results(last: Dict[str, np.ndarray], model: Model, meta: Dict, drift_li
 
     # --- Energy balance plots ---
     try:
-        plot_energy_balance(last, model, drift_limit)
+        plot_energy_balance(last, model, drift_limit, snapshot_limit=snapshot_limit)
     except Exception:
         pass
 
-def plot_ida(amps_g: np.ndarray, peak_drifts: List[float], drift_limit: float = 0.04):
+def plot_ida(amps_g: np.ndarray, peak_drifts: List[float], drift_limit: float = 0.10):
     if len(peak_drifts) == 0:
         return
     fig, ax = plt.subplots()
@@ -1478,7 +1504,8 @@ def plot_ida(amps_g: np.ndarray, peak_drifts: List[float], drift_limit: float = 
     plt.close(fig)
 
 def main():
-    drift_limit = 0.04
+    drift_limit = 0.10
+    snapshot_limit = 0.04
     alpha = -0.05
 
     peak_drifts, amps_used, last, model, meta = run_incremental_amplitudes(
@@ -1495,7 +1522,7 @@ def main():
     model, meta = build_portal_beam_hinge(H=3.0, L=5.0, T0=0.5, zeta=0.02, P_gravity_total=1500e3)
 
     plot_ida(amps_used, peak_drifts, drift_limit=drift_limit)
-    plot_results(last, model, meta, drift_limit=drift_limit)
+    plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit)
 
     # dt sensitivity (use a low amplitude that actually ran)
     if amps_used.size > 0:

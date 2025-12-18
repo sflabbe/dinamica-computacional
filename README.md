@@ -56,6 +56,6 @@ Genera:
 - `problem4_last_energy_balance.png`, `problem4_last_energy_residual*.png` (balance de energía)
 - `problem4_dt_sensitivity_*.png` + `problem4_dt_sensitivity.csv` (sensitividad en dt)
 
-**Criterio de colapso por drift (default): 4%**
+**Criterio de colapso por drift (default): 10% (snapshot/etiquetas a 4%)**
 
 # dinamica-computacional
