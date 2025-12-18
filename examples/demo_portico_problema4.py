@@ -33,6 +33,7 @@ Ejecutar:
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
@@ -110,39 +111,89 @@ def plot_structure_state(ax, model: Model, u: Optional[np.ndarray], title: str, 
     ax.set_ylabel("y [m]")
 
 
-def plot_structure_states(model: Model, last: Dict[str, np.ndarray], drift_height: float, outfile: str = "problem4_states_members.png"):
-    """State 1: undeformed model, State 2: gravity equilibrium, State 3: dynamic snapshot (peak drift)."""
+def plot_structure_states(
+    model: Model,
+    last: Dict[str, np.ndarray],
+    drift_height: float,
+    snapshot_limit: Optional[float] = None,
+    outfile: str = "problem4_states_members.png",
+):
+    """Plot undeformed, gravity, snapshot (drift>=limit) and peak-drift states."""
+    if snapshot_limit is None:
+        snapshot_limit = float(last.get("snapshot_limit", 0.04))
     u_hist = last.get("u", None)
     drift = last.get("drift", None)
     t = last.get("t", None)
 
     u_static = None
-    u_dyn = None
-    t_dyn = float("nan")
+    u_peak = None
+    t_peak = float("nan")
+    drift_peak = float("nan")
+    u_snap = None
+    t_snap = float("nan")
+    drift_snap = float("nan")
+    snap_reached = False
 
     if isinstance(u_hist, np.ndarray) and u_hist.ndim == 2 and u_hist.shape[0] >= 1:
         u_static = u_hist[0].copy()
         if isinstance(drift, np.ndarray) and drift.size:
-            k = int(np.argmax(np.abs(drift)))
-            u_dyn = u_hist[k].copy()
+            k_peak = int(np.argmax(np.abs(drift)))
+            u_peak = u_hist[k_peak].copy()
+            drift_peak = float(drift[k_peak])
             if isinstance(t, np.ndarray) and t.size:
-                t_dyn = float(t[k])
+                t_peak = float(t[k_peak])
 
-    # auto scale for visibility
+            if snapshot_limit is not None:
+                k_snap, t_snap, drift_snap, snap_reached = _snapshot_data(last, snapshot_limit)
+                if k_snap >= 0 and k_snap < u_hist.shape[0]:
+                    u_snap = u_hist[k_snap].copy()
+
+    # auto scale for visibility across all plotted states
     span = max(nd.x for nd in model.nodes) - min(nd.x for nd in model.nodes)
     span = float(span) if span > 0 else 1.0
     scale = 1.0
-    if u_dyn is not None:
-        umax = float(np.max(np.abs(u_dyn))) if u_dyn.size else 0.0
+    u_for_scale = [u for u in (u_static, u_peak, u_snap) if u is not None]
+    if u_for_scale:
+        umax = max(float(np.max(np.abs(u))) for u in u_for_scale if u.size)
         if umax > 0:
             target = 0.10 * span
             scale = min(80.0, target / umax)
 
-    fig, axs = plt.subplots(1, 3, figsize=(14, 4.8), constrained_layout=True)
-    plot_structure_state(axs[0], model, None, "State 1: Model (undeformed)", scale=1.0)
-    plot_structure_state(axs[1], model, u_static, f"State 2: Static (gravity eq.)\n(scale={scale:.1f}×)", scale=scale)
-    title3 = f"State 3: Dynamic snapshot (peak drift)\n t={t_dyn:.3f}s (scale={scale:.1f}×)"
-    plot_structure_state(axs[2], model, u_dyn, title3, scale=scale)
+    # build state list
+    states = [
+        ("State 1: Model (undeformed)", None),
+        (f"State 2: Static (gravity eq.)\n(scale={scale:.1f}×)", u_static),
+    ]
+    if u_snap is not None:
+        snap_label = (
+            f"State 3: Snapshot (drift ≥ {100.0 * float(snapshot_limit):.2f}%)"
+            if snap_reached else
+            f"State 3: Snapshot = peak drift (<{100.0 * float(snapshot_limit):.2f}%)"
+        )
+        snap_label += f"\n t={t_snap:.3f}s, drift={100.0*drift_snap:.2f}% (scale={scale:.1f}×)"
+        states.append((snap_label, u_snap))
+    states.append((
+        f"State {len(states)+1}: Dynamic peak drift\n"
+        f"t={t_peak:.3f}s, drift={100.0*drift_peak:.2f}% (scale={scale:.1f}×)",
+        u_peak,
+    ))
+
+    n_states = len(states)
+    if n_states <= 3:
+        fig, axs = plt.subplots(1, n_states, figsize=(4.8 * n_states, 4.8), constrained_layout=True)
+        axs = np.atleast_1d(axs)
+    else:
+        ncols = 2
+        nrows = math.ceil(n_states / ncols)
+        fig, axs = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 4.8 * nrows), constrained_layout=True)
+        axs = np.atleast_1d(axs).ravel()
+
+    for ax, (title, u_state) in zip(axs, states):
+        plot_structure_state(ax, model, u_state, title, scale=scale)
+
+    # hide unused axes if grid > states
+    for ax in axs[len(states):]:
+        ax.axis("off")
 
     fig.savefig(outfile, dpi=170)
     plt.close(fig)
@@ -151,6 +202,27 @@ def plot_structure_states(model: Model, last: Dict[str, np.ndarray], drift_heigh
 # -----------------------------
 # Diagnostics helpers
 # -----------------------------
+def _snapshot_data(last: Dict[str, np.ndarray], snapshot_limit: float) -> Tuple[int, float, float, bool]:
+    """Return (idx, t_snap, drift_snap, reached_flag). Fallback to peak if limit not reached."""
+    drift = last.get("drift", np.array([], dtype=float))
+    t = last.get("t", np.array([], dtype=float))
+
+    idx = int(last.get("snapshot_idx", -1))
+    if idx < 0 or idx >= drift.size:
+        idxs = np.where(np.abs(drift) >= snapshot_limit)[0] if drift.size else np.array([], dtype=int)
+        if idxs.size:
+            idx = int(idxs[0])
+        elif drift.size:
+            idx = int(np.argmax(np.abs(drift)))
+        else:
+            idx = -1
+
+    drift_snap = float(drift[idx]) if (idx >= 0 and idx < drift.size) else float("nan")
+    t_snap = float(t[idx]) if (idx >= 0 and idx < t.size) else float("nan")
+    reached = bool(last.get("snapshot_reached", abs(drift_snap) >= snapshot_limit if np.isfinite(drift_snap) else False))
+    return idx, t_snap, drift_snap, reached
+
+
 def format_snapshot(
     last: Dict[str, np.ndarray],
     drift_limit: float,
@@ -171,14 +243,25 @@ def format_snapshot(
     idxc = np.where(np.abs(drift) >= drift_limit)[0] if drift.size else np.array([], dtype=int)
     tc = float(t[int(idxc[0])]) if (isinstance(t, np.ndarray) and t.size and idxc.size) else float("nan")
 
-    idxs = np.where(np.abs(drift) >= snapshot_limit)[0] if drift.size else np.array([], dtype=int)
-    ts = float(t[int(idxs[0])]) if (isinstance(t, np.ndarray) and t.size and idxs.size) else float("nan")
+    snap_idx, ts, drift_snap, snap_reached = _snapshot_data(last, snapshot_limit)
 
     it = last.get("iters", np.array([], dtype=int))
     it_max = int(np.max(it)) if isinstance(it, np.ndarray) and it.size else 0
     it_mean = float(np.mean(it)) if isinstance(it, np.ndarray) and it.size else 0.0
+    it_total = int(np.sum(it)) if isinstance(it, np.ndarray) and it.size else 0
 
-    A_g = float(last.get("A_g", float("nan")))
+    A_ms2 = float(last.get("A_ms2", float("nan")))
+    A_input_g = float(last.get("A_input_g", float("nan")))
+    A_legacy = float(last.get("A_g", float("nan")))
+    if np.isfinite(A_ms2):
+        A_over_g = A_ms2 / g
+    elif np.isfinite(A_input_g):
+        A_over_g = A_input_g
+    elif np.isfinite(A_legacy):
+        # legacy stored in g -> detect
+        A_over_g = A_legacy if A_legacy < 5.0 else A_legacy / g
+    else:
+        A_over_g = float("nan")
     dt = float(last.get("dt", float("nan")))
     alpha = float(last.get("alpha", float("nan")))
     rho_inf = float(last.get("rho_inf", float("nan")))
@@ -186,21 +269,31 @@ def format_snapshot(
     beta = float(last.get("beta", float("nan")))
     zeta = float(last.get("zeta", float("nan")))
     T0 = float(last.get("T0", float("nan")))
+    solve_time = float(last.get("solve_time_s", float("nan")))
+    n_steps = int(last.get(
+        "n_steps",
+        it.size if (isinstance(it, np.ndarray) and it.size) else (t.size - 1 if isinstance(t, np.ndarray) and t.size else 0),
+    ))
+    sim_span = float(t[-1] - t[0]) if isinstance(t, np.ndarray) and t.size > 0 else float("nan")
+    hinge_steps = len(last.get("hinges", [])) if isinstance(last.get("hinges", []), list) else 0
 
     lines = [
-        f"A = {A_g/g:.2f} g",
+        f"A = {A_over_g:.2f} g",
         f"dt = {1e3*dt:.3f} ms",
         f"T0 ≈ {T0:.3f} s, ζ = {zeta:.3f}",
         f"HHT-α: α={alpha:+.3f}, ρ∞={rho_inf:.3f}",
         f"γ={gamma:.3f}, β={beta:.3f}",
         f"Peak drift = {100*pk_drift:.2f}%  (colapso {100*drift_limit:.2f}%)",
-        f"Snapshot drift = {100*snapshot_limit:.2f}%",
+        f"Snapshot drift = {100*abs(drift_snap):.2f}%{'' if snap_reached else ' (peak<limit)'}",
         f"Peak Vb = {pk_vb/1e3:.1f} kN",
-        f"Newton iters: max={it_max}, mean={it_mean:.1f}",
+        f"Newton iters: max={it_max}, mean={it_mean:.1f}, total={it_total}",
+        f"Steps = {n_steps} (sim span={sim_span:.3f}s, wall={solve_time:.3f}s)",
     ]
+    if hinge_steps:
+        lines.append(f"Hinge records stored for {hinge_steps} steps")
     if idxc.size:
         lines.append(f"Collapse @ t={tc:.3f}s")
-    if idxs.size:
+    if snap_idx >= 0:
         lines.append(f"Snapshot @ t={ts:.3f}s")
     if extra:
         for k, v in extra.items():
@@ -394,6 +487,7 @@ def plot_energy_balance(last: Dict[str, np.ndarray], model: Model, drift_limit: 
 def dt_sensitivity_analysis(H=3.0, L=5.0, T0=0.5, zeta=0.02,
                             A_g: float = 0.20,
                             drift_limit: float = 0.10,
+                            snapshot_limit: float = 0.04,
                             alpha: float = -0.05,
                             t_end: float = 3.0,
                             dts: Tuple[float, ...] = (0.004, 0.002, 0.001, 0.0005)):
@@ -407,8 +501,9 @@ def dt_sensitivity_analysis(H=3.0, L=5.0, T0=0.5, zeta=0.02,
         model, meta = build_portal_beam_hinge(H=H, L=L, T0=T0, zeta=zeta, P_gravity_total=1500e3)
         t = make_time(t_end, dt)
         ag = ag_fun(t, A)
-        out = hht_alpha_newton(model, t, ag, drift_height=H, drift_limit=drift_limit, alpha=alpha, max_iter=60, tol=1e-6, verbose=False)
-        out["A_g"] = float(A_g)
+        out = hht_alpha_newton(model, t, ag, drift_height=H, drift_limit=drift_limit, drift_snapshot=snapshot_limit, alpha=alpha, max_iter=60, tol=1e-6, verbose=False)
+        out["A_ms2"] = float(A)
+        out["A_input_g"] = float(A_g)
         out["zeta"] = float(zeta)
         out["T0"] = float(T0)
         eb = compute_energy_balance(out, model)
@@ -932,6 +1027,21 @@ class Model:
         return float(Vb)
 
 
+def column_axial_history(model: Model, u_hist: np.ndarray) -> np.ndarray:
+    """Return axial force history per column hinge (rows=time steps, cols=hinges)."""
+    n_steps = max(u_hist.shape[0] - 1, 0)
+    n_cols = len(model.col_hinge_groups)
+    N_hist = np.zeros((n_steps, n_cols), dtype=float)
+    for k in range(1, u_hist.shape[0]):
+        N_beam = []
+        for b in model.beams:
+            _, _, _, meta = b.stiffness_and_force_global(u_hist[k])
+            N_beam.append(meta["N"])
+        for idx, (_, beam_idx, sign) in enumerate(model.col_hinge_groups):
+            N_hist[k-1, idx] = float(sign) * float(N_beam[beam_idx])
+    return N_hist
+
+
 # -----------------------------
 # Solver: HHT-alpha + Newton
 # -----------------------------
@@ -939,13 +1049,16 @@ def hht_alpha_newton(model: Model,
                      t: np.ndarray,
                      ag: np.ndarray,
                      drift_height: float,
-                     drift_limit: float = 0.04,
+                     drift_limit: float = 0.10,
+                     drift_snapshot: float = 0.04,
                      alpha: float = -0.05,
                      max_iter: int = 40,
                      tol: float = 1e-6,
                      verbose: bool = False) -> Dict[str, np.ndarray]:
     if not (-1.0/3.0 - 1e-12 <= alpha <= 1e-12):
         raise ValueError("HHT-alpha requires alpha in [-1/3, 0].")
+
+    solve_start = time.perf_counter()
 
     model.reset_state()
     nd = model.ndof()
@@ -995,6 +1108,7 @@ def hht_alpha_newton(model: Model,
     iters = np.zeros(t.size-1, dtype=int)
 
     hinge_hist: List[List[Dict]] = []
+    snapshot_idx: Optional[int] = None
 
     # helper drift: top joints are node2 and node3 (physical)
     ux2 = model.nodes[2].dof_u[0]
@@ -1068,6 +1182,8 @@ def hht_alpha_newton(model: Model,
         a_hist[n+1] = a_n
         drift[n+1] = 0.5 * (u_n[ux2] + u_n[ux3]) / drift_height
         Vb[n+1] = model.base_shear(u_n)
+        if snapshot_idx is None and abs(drift[n+1]) >= drift_snapshot:
+            snapshot_idx = n + 1
 
         if abs(drift[n+1]) >= drift_limit:
             if verbose:
@@ -1082,6 +1198,15 @@ def hht_alpha_newton(model: Model,
             ag = ag[:n+2]
             iters = iters[:n+1]
             break
+
+    n_steps = iters.size
+    iters_total = int(np.sum(iters)) if iters.size else 0
+    solve_time_s = time.perf_counter() - solve_start
+    if snapshot_idx is None:
+        snapshot_idx = int(np.argmax(np.abs(drift))) if drift.size else -1
+    snapshot_drift = float(drift[int(snapshot_idx)]) if (snapshot_idx >= 0 and snapshot_idx < drift.size) else float("nan")
+    snapshot_t = float(t[int(snapshot_idx)]) if (snapshot_idx >= 0 and snapshot_idx < t.size) else float("nan")
+    snapshot_reached = bool(abs(snapshot_drift) >= drift_snapshot) if np.isfinite(snapshot_drift) else False
 
     return {
         "t": t,
@@ -1098,6 +1223,14 @@ def hht_alpha_newton(model: Model,
         "gamma": gamma,
         "beta": beta,
         "rho_inf": rho_inf,
+        "n_steps": n_steps,
+        "iters_total": iters_total,
+        "solve_time_s": solve_time_s,
+        "snapshot_idx": int(snapshot_idx),
+        "snapshot_t": snapshot_t,
+        "snapshot_drift": snapshot_drift,
+        "snapshot_limit": drift_snapshot,
+        "snapshot_reached": snapshot_reached,
     }
 
 
@@ -1265,6 +1398,7 @@ def ag_fun(t: np.ndarray, A: float) -> np.ndarray:
 
 def run_incremental_amplitudes(H=3.0, L=5.0, T0=0.5, zeta=0.02,
                                drift_limit=0.10,
+                               snapshot_limit=0.04,
                                amps_g=np.arange(0.1, 2.1, 0.1),
                                t_end=10.0,
                                base_dt=0.002,
@@ -1292,9 +1426,10 @@ def run_incremental_amplitudes(H=3.0, L=5.0, T0=0.5, zeta=0.02,
             ag = ag_fun(t, A)
             try:
                 out = hht_alpha_newton(model, t, ag, drift_height=H,
-                                       drift_limit=drift_limit, alpha=alpha,
+                                       drift_limit=drift_limit, drift_snapshot=snapshot_limit, alpha=alpha,
                                        max_iter=50, tol=1e-6, verbose=False)
-                out["A_g"] = float(A_g)
+                out["A_ms2"] = float(A)
+                out["A_input_g"] = float(A_g)
                 out["zeta"] = float(zeta)
                 out["T0"] = float(T0)
                 last = out
@@ -1309,10 +1444,21 @@ def run_incremental_amplitudes(H=3.0, L=5.0, T0=0.5, zeta=0.02,
         pk = float(np.max(np.abs(out["drift"])))
         peak_drifts.append(pk)
         print(f"Peak drift = {100*pk:.2f}%")
+        n_steps = int(out.get("n_steps", out["iters"].size if out["iters"].size else 0))
+        it_total = int(out.get("iters_total", np.sum(out["iters"]) if out["iters"].size else 0))
+        sim_span = float(out["t"][-1] - out["t"][0]) if out.get("t", np.array([])).size else float("nan")
+        solver_time = float(out.get("solve_time_s", float("nan")))
         if out["iters"].size:
-            print(f"Newton iters: max={int(np.max(out['iters']))}, mean={float(np.mean(out['iters'])):.1f} | alpha={out.get('alpha', float('nan')):+.3f}, gamma={out.get('gamma', float('nan')):.3f}, beta={out.get('beta', float('nan')):.3f}, rho_inf={out.get('rho_inf', float('nan')):.3f}, dt={out.get('dt', float('nan'))*1e3:.3f} ms\n")
+            print(
+                "Newton iters: "
+                f"max={int(np.max(out['iters']))}, mean={float(np.mean(out['iters'])):.1f}, total={it_total} | "
+                f"steps={n_steps}, sim_span={sim_span:.3f}s, wall={solver_time:.3f}s | "
+                f"alpha={out.get('alpha', float('nan')):+.3f}, gamma={out.get('gamma', float('nan')):.3f}, "
+                f"beta={out.get('beta', float('nan')):.3f}, rho_inf={out.get('rho_inf', float('nan')):.3f}, "
+                f"dt={out.get('dt', float('nan'))*1e3:.3f} ms\n"
+            )
         else:
-            print()
+            print(f"steps={n_steps}, sim_span={sim_span:.3f}s, wall={solver_time:.3f}s\n")
 
         if pk >= drift_limit:
             print(f"COLLAPSE by drift >= {100*drift_limit:.2f}%")
@@ -1331,6 +1477,7 @@ def plot_results(
     """Generate all standard plots for the last successful IDA run."""
     if last is None:
         return
+    plt.close("all")
 
     t = last.get("t", np.array([], dtype=float))
     drift = last.get("drift", np.array([], dtype=float))
@@ -1339,12 +1486,13 @@ def plot_results(
     snap = format_snapshot(last, drift_limit, snapshot_limit=snapshot_limit)
 
     if snapshot_limit is None:
-        snapshot_limit = drift_limit
+        snapshot_limit = float(last.get("snapshot_limit", drift_limit))
+    snap_idx, t_snap, drift_snap, snap_reached = _snapshot_data(last, snapshot_limit)
 
     # --- State plots (members + hinges) ---
     try:
         H = float(meta.get("H", 1.0))
-        plot_structure_states(model, last, drift_height=H, outfile="problem4_states_members.png")
+        plot_structure_states(model, last, drift_height=H, snapshot_limit=snapshot_limit, outfile="problem4_states_members.png")
     except Exception:
         pass
 
@@ -1352,6 +1500,8 @@ def plot_results(
     if t.size and ag.size:
         fig, ax = plt.subplots()
         ax.plot(t, ag)
+        if snap_idx >= 0 and np.isfinite(t_snap):
+            ax.axvline(t_snap, linestyle=":", linewidth=1.0, color="0.4")
         ax.set_xlabel("t [s]")
         ax.set_ylabel("a_g [m/s²]")
         ax.grid(True)
@@ -1365,7 +1515,6 @@ def plot_results(
         fig, ax = plt.subplots()
         ax.plot(t, 100.0 * drift)
         idxc = np.where(np.abs(drift) >= drift_limit)[0]
-        idxs = np.where(np.abs(drift) >= snapshot_limit)[0]
         if idxc.size:
             tc = float(t[int(idxc[0])])
             ax.axvline(tc, linestyle=":", linewidth=1.2)
@@ -1375,10 +1524,12 @@ def plot_results(
         if snapshot_limit != drift_limit:
             ax.axhline(100.0 * snapshot_limit, linestyle=":", color="0.4", linewidth=1.2)
             ax.axhline(-100.0 * snapshot_limit, linestyle=":", color="0.4", linewidth=1.2)
-        if idxs.size:
-            ts = float(t[int(idxs[0])])
-            ax.axvline(ts, linestyle=":", linewidth=1.0, color="0.4")
-            ax.text(ts, 0.0, f" t_snapshot={ts:.3f}s", rotation=90, va="top", fontsize=7)
+        if snap_idx >= 0 and np.isfinite(t_snap):
+            ax.axvline(t_snap, linestyle=":", linewidth=1.0, color="0.4")
+            label = "t_snapshot"
+            if not snap_reached:
+                label += " (peak<limit)"
+            ax.text(t_snap, 0.0, f" {label}={t_snap:.3f}s", rotation=90, va="top", fontsize=7)
         ax.set_xlabel("t [s]")
         ax.set_ylabel("drift [%]")
         ax.grid(True)
@@ -1393,6 +1544,9 @@ def plot_results(
         x = 100.0 * drift
         y = Vb / 1e3  # kN
         lc = colored_line(ax, x, y, t)
+        if snap_idx >= 0 and snap_idx < x.size:
+            ax.plot(x[snap_idx], y[snap_idx], marker="o", color="red", label="snapshot")
+            ax.legend(loc="best", fontsize=8)
         ax.set_xlabel("drift [%]")
         ax.set_ylabel("V_base [kN]")
         ax.grid(True)
@@ -1456,16 +1610,24 @@ def plot_results(
                 for k, hinfs in enumerate(hinges_hist):
                     for j in range(nh):
                         Mhist[k, j] = float(hinfs[j].get("M", 0.0))
-                tt = t[:len(hinges_hist)]
+                tt = t[1:len(hinges_hist)+1] if t.size >= len(hinges_hist)+1 else np.arange(len(hinges_hist)) * float(last.get("dt", 1.0))
                 col_hinge_ids = [i for i, h in enumerate(model.hinges) if h.kind == "col_nm"]
-                Nrefs = meta.get("N_ref_per_col_hinge", None)
+                N_hist = column_axial_history(model, last.get("u", np.zeros((1, model.ndof()))))
+                N_hist = N_hist[:len(hinges_hist)]
+                col_map = {hid: idx for idx, (hid, _, _) in enumerate(model.col_hinge_groups)}
                 last_lc = None
                 for idx_i, hid in enumerate(col_hinge_ids):
-                    Nref = float(Nrefs[idx_i]) if isinstance(Nrefs, (list, tuple, np.ndarray)) and idx_i < len(Nrefs) else float(meta.get("N_ref", 0.0))
-                    x = np.full_like(tt, Nref/1e3, dtype=float)
-                    y = Mhist[:, hid] / 1e3
-                    last_lc = colored_line(ax, x, y, tt)
+                    col_idx = col_map.get(hid, None)
+                    if col_idx is None or N_hist.shape[0] == 0:
+                        continue
+                    mcount = min(Mhist.shape[0], N_hist.shape[0], tt.size)
+                    x = N_hist[:mcount, col_idx] / 1e3
+                    y = Mhist[:mcount, hid] / 1e3
+                    tt_plot = tt[:mcount] if tt.size >= mcount else np.arange(mcount) * float(last.get("dt", 1.0))
+                    last_lc = colored_line(ax, x, y, tt_plot)
                     ax.add_collection(last_lc)
+                    if snap_idx is not None and snap_idx > 0 and snap_idx - 1 < mcount:
+                        ax.plot(x[snap_idx-1], y[snap_idx-1], marker="o", color="red", markersize=4)
                     ax.text(x[0], y[0], f"H{hid}", fontsize=8, ha="left", va="bottom")
                 ax.autoscale()
                 if last_lc is not None:
@@ -1536,6 +1698,7 @@ def main():
         H=3.0, L=5.0, T0=0.5, zeta=0.02,
         A_g=A_sens,
         drift_limit=drift_limit,
+        snapshot_limit=snapshot_limit,
         alpha=alpha,
         t_end=3.0,
         dts=(0.004, 0.002, 0.001, 0.0005),
