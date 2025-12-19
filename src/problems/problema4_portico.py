@@ -289,8 +289,32 @@ def plot_results(
     if last is None:
         return
     H = float(meta.get("H", 1.0))
-    plot_structure_states(model, last, drift_height=H, snapshot_limit=snapshot_limit,
-                          outfile="problem4_states_members.png")
+    plot_structure_states(
+        model,
+        last,
+        drift_height=H,
+        snapshot_limit=snapshot_limit,
+        outfile="problem4_states_U.png",
+        field="U",
+        shared_colorbar=True,
+    )
+    plot_structure_states(
+        model,
+        last,
+        drift_height=H,
+        snapshot_limit=snapshot_limit,
+        outfile="problem4_states_S.png",
+        field="S",
+        shared_colorbar=True,
+    )
+    plot_structure_states(
+        model,
+        last,
+        drift_height=H,
+        snapshot_limit=snapshot_limit,
+        outfile="problem4_states_members.png",
+        field="both",
+    )
 
 
 def main():

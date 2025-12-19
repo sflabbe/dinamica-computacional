@@ -325,6 +325,29 @@ def run_inp(path: str, abaqus_like_logs: bool = False, output_dir: Optional[str]
                 outfile=f"{prefix.name}_states.png",
                 benchmark_kind=benchmark_kind,
                 benchmark_report=benchmark_report,
+                field="both",
+            )
+            plot_structure_states(
+                model,
+                last,
+                drift_height=height,
+                snapshot_limit=0.04,
+                outfile=f"{prefix.name}_states_U.png",
+                benchmark_kind=benchmark_kind,
+                benchmark_report=benchmark_report,
+                field="U",
+                shared_colorbar=True,
+            )
+            plot_structure_states(
+                model,
+                last,
+                drift_height=height,
+                snapshot_limit=0.04,
+                outfile=f"{prefix.name}_states_S.png",
+                benchmark_kind=benchmark_kind,
+                benchmark_report=benchmark_report,
+                field="S",
+                shared_colorbar=True,
             )
             u_last = last["u"][-1]
             write_member_stress_csv(model, u_last, f"{prefix.name}_member_stress.csv")
