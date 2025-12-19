@@ -14,7 +14,6 @@ Se han incluido las clases 'plastic_hinge' (Mock) dentro del script
 para eliminar dependencias externas y asegurar la ejecución.
 """
 
-from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field

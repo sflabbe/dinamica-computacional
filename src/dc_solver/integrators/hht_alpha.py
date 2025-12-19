@@ -76,12 +76,6 @@ def hht_alpha_newton(
     a0 = 1.0 / (beta * dt * dt)
     a1 = gamma / (beta * dt)
 
-    if verbose:
-        print(
-            f"[HHT] steps={t.size - 1} dt={dt:.6f}s alpha={alpha:.3f} "
-            f"beta={beta:.4f} gamma={gamma:.4f}"
-        )
-
     r = np.zeros(nd)
     r[np.where(M > 0.0)[0]] = 1.0
 
@@ -146,9 +140,6 @@ def hht_alpha_newton(
                 )
             )
 
-        if verbose:
-            print(f"[HHT] inc {n + 1}/{t.size - 1} t={t[n + 1]:.3f}s")
-
         for it in range(1, max_iter + 1):
             u_trial = u_comm_step.copy()
             u_trial[fd] = u_free
@@ -187,8 +178,6 @@ def hht_alpha_newton(
                             note=None,
                         )
                     )
-                if verbose:
-                    print(f"[HHT]   converged in {it} iters (|res|={res_norm:.3e})")
                 u_n = u_trial
                 v_n = v_trial
                 a_n = a_trial
@@ -257,9 +246,7 @@ def hht_alpha_newton(
                         step_time_completed=float(t[n + 1]),
                         total_time_completed=float(t[n + 1]),
                     )
-                    )
-            if verbose:
-                print(f"[HHT]   failed to converge after {max_iter} iters")
+                )
             raise RuntimeError(f"No converge en paso {n+1} / t={t[n+1]:.3f}s (HHT-alpha).")
 
         u_hist[n + 1] = u_n

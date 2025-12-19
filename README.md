@@ -1,113 +1,111 @@
-# Plastic hinge N–M with associative flow (return mapping)
+# Dinámica Computacional — pórtico + rótulas plásticas (N–M) + fibras
 
-Self-contained implementation of a **2D axial force–bending moment (N–M) plastic hinge**
-based on a **convex polygonal interaction surface** and a **closest-point / return-mapping** update
-(**associative flow**).
+Este repo contiene un solver estructural 2D (frame) con:
+- rótulas elasto-plásticas **acopladas N–M** (superficie poligonal + return mapping),
+- rótula tipo **SHM** para vigas (histeresis degradada),
+- y un **Problema 5** para construir la curva de interacción N–M desde una **sección de fibras 2D**.
 
-## Contents
+Incluye integración en el tiempo con selección por CLI:
 
-- `plastic_hinge/return_mapping.py`  
-  Closest-point projection to a convex polytope `A s <= b` in 2D using an active-set/KKT approach.
-- `plastic_hinge/hinge_nm.py`  
-  Plastic hinge state update using a predictor–corrector:
-  - elastic predictor `s_trial`
-  - plastic corrector by projection (return mapping) in metric `W = K^{-1}`
-  - plastic increment consistent with **associated flow** for polyhedral yield surfaces.
-- `plastic_hinge/nm_surface.py`  
-  Convex hull + half-space representation of an N–M interaction polygon.
-- `plastic_hinge/rc_section.py`  
-  Simple **rectangular RC** fiber section + quick interaction sampling.
-- `plastic_hinge/fiber_section.py`  
-  **Generic fiber section** interface (so you can build arbitrary RC geometries with your own fibers).
+- `hht` (HHT-α, default)
+- `newmark` (Newmark-β)
+- `explicit` (Velocity Verlet)
 
-## Quick demo
+> Salidas: por defecto se guardan en `./outputs/`.
+
+---
+
+## Instalación rápida
+
+Recomendado (editable install):
 
 ```bash
-python -m examples.demo_interaction_and_hinge
+python -m pip install -U pip
+python -m pip install -e .
 ```
 
-## dc_solver engine + Abaqus-like input
+Alternativa (sin instalar): varios scripts en `src/problems/` se pueden ejecutar directo con `python src/problems/...py`.
 
-The canonical analysis engine lives in `src/dc_solver` and reads Abaqus-like
-`.inp` files. A ready-to-run example is:
+---
+
+## Integradores (HHT / Newmark / Explicit)
+
+En los problemas dinámicos y en el runner, usa:
 
 ```bash
-python -m dc_solver.run examples/abaqus_like/portal_6seg.inp
+--integrator hht
+--integrator newmark
+--integrator explicit
 ```
 
-Quickstart:
+Ejemplos:
 
 ```bash
-pip install -e .[dev]
-pytest
-python -m dc_solver.run examples/abaqus_like/beam_cantilever_tipload.inp
+python -m problems.problema4_portico --integrator hht
+python -m problems.problema4_portico --integrator newmark
+python -m problems.problema4_portico --integrator explicit
 ```
 
-## Abaqus-like log files (.sta/.msg/.dat)
-
-Enable Abaqus-style logs for a run with `--abaqus-like-logs` (and optional
-`--output-dir` for where the files are written):
+Runner genérico:
 
 ```bash
-python -m dc_solver.run examples/abaqus_like/beam_cantilever_tipload.inp --abaqus-like-logs --output-dir results/beam_demo
+python -m dc_solver.run inputs/portal_frame.inp --integrator newmark
 ```
 
-This produces three files:
+---
 
-- `<job>.sta`: status table by increment (STEP, INC, ATT, iteration counts, and times).
-- `<job>.msg`: step/increment/iteration messages suitable for `tail -f`.
-- `<job>.dat`: input echo, warnings, and a final summary.
+## Ejecutar problemas
 
-Legal note: this is an Abaqus-like layout for familiarity; not affiliated with Dassault Systèmes.
-
-## Notes
-
-- This is intended for research/prototyping and coursework-level models.
-- Replace the default elastic stiffness extraction (`hinge_factory.py`) with your preferred EA/EI calibration.
-
-## Benchmarks
-
-Two simple beam benchmarks with closed-form Euler–Bernoulli comparisons live in
-`examples/abaqus_like/`:
-
-- Cantilever with tip point load:
-  - Tip deflection: \u03b4 = P L^3 / (3 E I)
-  - Tip rotation: \u03b8 = P L^2 / (2 E I)
-- Simply supported beam with midspan point load:
-  - Midspan deflection: \u03b4 = P L^3 / (48 E I)
-
-See `tests/test_beam_benchmarks_theory.py` for the exact comparisons.
-Beam benchmark plots now show curvature; run:
+### Problema 2 — rótula N–M (axial / flexión / combinado)
 
 ```bash
-python -m dc_solver.run examples/abaqus_like/beam_cantilever_tipload.inp
+python src/problems/problema2_interaccion.py
+python src/problems/problema2_hinge_nm_verification.py
 ```
 
-## Input format
+Exporta automáticamente:
+- `problem2_*_paths*.png` (trayectorias N–M)
+- `problem2_*_hysteresis*.png` (M–θ y N–ε)
+- versiones `_gradient.png` con **gradiente de color por step** (para ver el tiempo).
 
-Supported Abaqus-like cards, limitations, and examples are documented in
-`docs/INPUT_FORMAT.md`.
+> En **flexión pura** se controla `N≈0` resolviendo `Δε` por bisección (evita serrucho artificial por restricción axial).
 
-## Example: Pórtico (Problema 4) — Beam elements + 6 rótulas
-
-Ejecuta:
+### Problema 4 — pórtico (time-history) con rótulas
 
 ```bash
-python -m examples.demo_portico_problema4
+python -m problems.problema4_portico --integrator hht
 ```
 
-Genera:
+Exporta:
+- drift vs tiempo, Vb vs drift
+- estados (U/S) en varios snapshots
+- `problem4_hinge_hysteresis_gradient.png` + CSVs por rótula seleccionada
+  (gradiente de color por **t [s]**)
 
-- `problem4_IDA.png`
-- `problem4_last_*.png` (ag, drift, Vbase–drift, M–θ por rótula, N–M ±M con gradiente temporal)
-- `problem4_last_energy_balance.png`, `problem4_last_energy_residual*.png` (balance de energía)
-- `problem4_dt_sensitivity_*.png` + `problem4_dt_sensitivity.csv` (sensitividad en dt)
-
-**Criterio de colapso por drift (default): 10% (snapshot/etiquetas a 4%)**
-
-## Development
+### Problema 5 — sección RC por fibras 2D → curva N–M
 
 ```bash
-pip install -e .[dev]
-pytest -q
+python -m problems.problema5_fiber_section_interaction
 ```
+
+Asume:
+- acero **A420** (fy=420 MPa)
+- hormigón **C20/25** (fc≈20 MPa)
+
+y genera malla 2D de fibras + interacción N–M (convex hull).
+
+---
+
+## Ejecutar todo (2–3–4–5)
+
+```bash
+python -m problems.run_all_problems_2_3_4
+```
+
+---
+
+## Estructura (alto nivel)
+
+- `plastic_hinge/` : return mapping 2D + superficie poligonal N–M
+- `src/dc_solver/` : FEM + integradores + post-proceso
+- `src/problems/`  : scripts reproducibles por problema

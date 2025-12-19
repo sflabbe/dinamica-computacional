@@ -22,7 +22,7 @@ from dc_solver.io.abaqus_inp import (
     apply_cloads,
     amplitude_series,
 )
-from dc_solver.integrators.hht_alpha import hht_alpha_newton
+from dc_solver.integrators import solve_dynamic
 from dc_solver.post.plotting import (
     plot_model_assembly,
     plot_structure_state,
@@ -42,6 +42,7 @@ def _outputs_dir(base: Optional[str] = None) -> Path:
 @dataclass
 class SimulationSession:
     output_dir: Path
+    integrator: str = "hht"
     verbose: bool = False
     data: Optional[object] = None
     model: Optional[object] = None
@@ -105,19 +106,24 @@ class SimulationSession:
                 if dof != 1:
                     raise ValueError("Only DOF=1 (ux) acceleration supported in this runner.")
                 base_nodes, drift_nodes, height = _extreme_nodes_by_y(model)
-                last = hht_alpha_newton(
-                    model,
-                    t,
-                    ag,
+                last = solve_dynamic(
+                    self.integrator,
+                    model=model,
+                    t=t,
+                    ag=ag,
                     drift_height=height,
                     base_nodes=base_nodes,
                     drift_nodes=drift_nodes,
                     drift_limit=0.10,
                     drift_snapshot=0.04,
                     alpha=-0.05,
+                    beta=0.25,
+                    gamma=0.50,
                     max_iter=40,
                     tol=1e-6,
                     verbose=self.verbose,
+                    reporter=None,
+                    step_id=step_id,
                 )
                 step_time = float(t[-1]) if t.size else 0.0
                 total_time += step_time
@@ -227,6 +233,12 @@ def _print_help() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Interactive CLI for dinamica-computacional.")
     parser.add_argument(
+        "--integrator",
+        default="hht",
+        choices=["hht", "newmark", "explicit"],
+        help="Dynamic time integrator (default: hht).",
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="Directory for generated plots (default: ./outputs/cli).",
@@ -284,6 +296,12 @@ def main() -> None:
                         print(f"Wrote {path}")
                 else:
                     print(f"Unknown plot target '{target}'.")
+            elif cmd == "integrator" and len(parts) > 1:
+                val = parts[1].strip().lower()
+                if val not in {"hht", "newmark", "explicit"}:
+                    raise ValueError("integrator must be one of: hht, newmark, explicit")
+                session.integrator = val
+                print(f"Integrator set to {val}")
             elif cmd == "results":
                 print(session.summary())
             else:

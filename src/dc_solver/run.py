@@ -11,7 +11,7 @@ from typing import Dict, Optional, Tuple, List
 import numpy as np
 
 from dc_solver.io.abaqus_inp import parse_inp, build_model, apply_gravity, apply_cloads, amplitude_series
-from dc_solver.integrators.hht_alpha import hht_alpha_newton
+from dc_solver.integrators import solve_dynamic
 from dc_solver.post.plotting import plot_structure_states, write_member_stress_csv
 from dc_solver.reporting import (
     AbaqusLikeReporter,
@@ -160,12 +160,7 @@ def _input_echo_lines(data) -> List[str]:
     return lines
 
 
-def run_inp(
-    path: str,
-    abaqus_like_logs: bool = False,
-    output_dir: Optional[str] = None,
-    verbose: bool = False,
-) -> None:
+def run_inp(path: str, abaqus_like_logs: bool = False, output_dir: Optional[str] = None, integrator: str = "hht") -> None:
     reporter = None
     exc: Optional[Exception] = None
     job_name = Path(path).stem
@@ -289,19 +284,22 @@ def run_inp(
                     raise ValueError("Only DOF=1 (ux) acceleration supported in this runner.")
 
                 base_nodes, drift_nodes, height = _extreme_nodes_by_y(model)
-                last = hht_alpha_newton(
-                    model,
-                    t,
-                    ag,
+                last = solve_dynamic(
+                    integrator=integrator,
+                    model=model,
+                    t=t,
+                    ag=ag,
                     drift_height=height,
                     base_nodes=base_nodes,
                     drift_nodes=drift_nodes,
                     drift_limit=0.10,
                     drift_snapshot=0.04,
                     alpha=-0.05,
+                    beta=0.25,
+                    gamma=0.50,
                     max_iter=40,
                     tol=1e-6,
-                    verbose=verbose,
+                    verbose=False,
                     reporter=reporter.on_event if reporter is not None else None,
                     step_id=step_id,
                 )
@@ -384,6 +382,12 @@ def run_inp(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Abaqus-like .inp model.")
+    parser.add_argument(
+        "--integrator",
+        default="hht",
+        choices=["hht", "newmark", "explicit"],
+        help="Dynamic time integrator to use for *DYNAMIC steps (default: hht).",
+    )
     parser.add_argument("inp_path", help="Path to .inp file")
     parser.add_argument(
         "--abaqus-like-logs",
@@ -395,18 +399,8 @@ def main() -> None:
         default=None,
         help="Directory for output logs when using --abaqus-like-logs.",
     )
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Print per-increment status data during the simulation.",
-    )
     args = parser.parse_args()
-    run_inp(
-        args.inp_path,
-        abaqus_like_logs=args.abaqus_like_logs,
-        output_dir=args.output_dir,
-        verbose=args.status,
-    )
+    run_inp(args.inp_path, abaqus_like_logs=args.abaqus_like_logs, output_dir=args.output_dir, integrator=args.integrator)
 
 
 if __name__ == "__main__":

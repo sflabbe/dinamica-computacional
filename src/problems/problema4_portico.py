@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 import math
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -12,6 +14,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
 
 from plastic_hinge import RCSectionRect, RebarLayer, NMSurfacePolygon, PlasticHingeNM
 
@@ -26,12 +29,9 @@ from dc_solver.hinges.models import (
     RotSpringElement,
     moment_capacity_from_polygon,
 )
-from dc_solver.integrators.hht_alpha import hht_alpha_newton
-from dc_solver.post.plotting import (
-    plot_structure_states,
-    plot_hinge_hysteresis,
-    plot_hinge_nm_interaction,
-)
+from dc_solver.integrators import solve_dynamic
+from dc_solver.post.hysteresis_gradient import add_time_gradient_line, add_colorbar
+from dc_solver.post.plotting import plot_structure_states
 
 
 def mirror_section_about_middepth(sec: RCSectionRect) -> RCSectionRect:
@@ -254,7 +254,109 @@ def ag_fun(t: np.ndarray, A: float) -> np.ndarray:
     return A * np.cos(0.2 * np.pi * t) * np.sin(4.0 * np.pi * t)
 
 
+def export_hinge_hysteresis_gradient(
+    out: Path,
+    model: Model,
+    last: Dict,
+    *,
+    max_hinges: int = 10,
+) -> None:
+    """Export M–Δθ hysteresis for hinges with a time color gradient.
+
+    The dynamic solvers store a per-step hinge info list in last["hinges"].
+    We reconstruct Δθ(t) from the global displacement history u(t).
+    """
+    hinge_hist = last.get("hinges", [])
+    if not hinge_hist:
+        return
+
+    u = np.asarray(last["u"], dtype=float)
+    t = np.asarray(last["t"], dtype=float)
+
+    n = min(len(hinge_hist), u.shape[0] - 1, t.shape[0] - 1)
+    if n <= 1:
+        return
+
+    time = t[1 : n + 1]
+
+    hinges = getattr(model, "hinges", [])
+    if not hinges:
+        return
+
+    # Determine number of hinge entries (guard against mismatches)
+    n_hinges = min(len(hinges), len(hinge_hist[0]))
+    if n_hinges <= 0:
+        return
+
+    # Rank hinges by moment range to avoid exporting dozens of near-flat plots
+    ranges = []
+    for ih in range(n_hinges):
+        M = np.array([float(hinge_hist[k][ih].get("M", float("nan"))) for k in range(n)], dtype=float)
+        rng = float(np.nanmax(M) - np.nanmin(M)) if np.isfinite(M).any() else 0.0
+        ranges.append(rng)
+
+    selected = sorted(range(n_hinges), key=lambda i: -ranges[i])[: max_hinges]
+    selected = [ih for ih in selected if ranges[ih] > 0.0] or selected[:1]
+
+    norm = Normalize(vmin=float(time.min()), vmax=float(time.max()))
+
+    # Combined figure
+    fig, axes = plt.subplots(len(selected), 1, figsize=(7.2, 2.4 * len(selected)), squeeze=False)
+    axes = axes[:, 0]
+
+    last_lc = None
+    for ax, ih in zip(axes, selected):
+        dofs = np.asarray(hinges[ih].dofs(), dtype=int)
+        th_i = u[1 : n + 1, dofs[2]]
+        th_j = u[1 : n + 1, dofs[5]]
+        dth = th_j - th_i
+        M = np.array([float(hinge_hist[k][ih].get("M", float("nan"))) for k in range(n)], dtype=float)
+
+        last_lc = add_time_gradient_line(ax, dth, M, c=time, norm=norm, lw=2.0)
+        kind = getattr(hinges[ih], "kind", "hinge")
+        ni = getattr(hinges[ih], "ni", "?")
+        nj = getattr(hinges[ih], "nj", "?")
+        ax.set_ylabel(f"M [N-m]\n#{ih} {kind} ({ni}-{nj})")
+        ax.grid(True, alpha=0.3)
+
+        # CSV export for this hinge
+        csv = np.column_stack([time, dth, M])
+        np.savetxt(out / f"problem4_hinge_{ih}_{kind}_hysteresis.csv", csv, delimiter=",", header="t,dtheta,M", comments="")
+
+    axes[-1].set_xlabel("Δθ [rad]")
+    if last_lc is not None:
+        add_colorbar(last_lc, axes[-1], label="t [s]")
+
+    fig.suptitle("Problem 4 — hinge hysteresis (time gradient)", y=1.02)
+    fig.tight_layout()
+    fig.savefig(out / "problem4_hinge_hysteresis_gradient.png", dpi=170)
+    plt.close(fig)
+
+    # Individual hinge figures (selected only)
+    for ih in selected:
+        dofs = np.asarray(hinges[ih].dofs(), dtype=int)
+        th_i = u[1 : n + 1, dofs[2]]
+        th_j = u[1 : n + 1, dofs[5]]
+        dth = th_j - th_i
+        M = np.array([float(hinge_hist[k][ih].get("M", float("nan"))) for k in range(n)], dtype=float)
+
+        fig, ax = plt.subplots(figsize=(6.2, 4.2))
+        lc = add_time_gradient_line(ax, dth, M, c=time, norm=norm, lw=2.2)
+        add_colorbar(lc, ax, label="t [s]")
+        kind = getattr(hinges[ih], "kind", "hinge")
+        ni = getattr(hinges[ih], "ni", "?")
+        nj = getattr(hinges[ih], "nj", "?")
+        ax.set_title(f"Hinge #{ih} {kind} ({ni}-{nj})")
+        ax.set_xlabel("Δθ [rad]")
+        ax.set_ylabel("M [N-m]")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out / f"problem4_hinge_{ih}_{kind}_hysteresis_gradient.png", dpi=170)
+        plt.close(fig)
+
+
 def run_incremental_amplitudes(
+    integrator: str = "hht",
     H=3.0,
     L=5.0,
     T0=0.5,
@@ -269,7 +371,6 @@ def run_incremental_amplitudes(
     nseg: int = 6,
     cover: float = 0.05,
     nlgeom: bool = False,
-    verbose: bool = False,
 ):
     g = 9.81
     model, meta = build_portal_beam_hinge(
@@ -286,7 +387,6 @@ def run_incremental_amplitudes(
     peak_drifts = []
     dt_hist = []
     last = None
-    runs: List[Dict[str, np.ndarray]] = []
 
     for A_g in amps_g:
         A = float(A_g) * g
@@ -295,35 +395,33 @@ def run_incremental_amplitudes(
             t = make_time(t_end, dt)
             ag = ag_fun(t, A)
             try:
-                out = hht_alpha_newton(
-                    model,
-                    t,
-                    ag,
+                out = solve_dynamic(
+                    integrator,
+                    model=model,
+                    t=t,
+                    ag=ag,
                     drift_height=H,
                     drift_limit=drift_limit,
                     drift_snapshot=snapshot_limit,
                     alpha=alpha,
+                    beta=0.25,
+                    gamma=0.50,
                     base_nodes=(0, 1),
                     drift_nodes=(2, 3),
                     max_iter=50,
                     tol=1e-6,
-                    verbose=verbose,
+                    verbose=False,
                 )
                 out["A_ms2"] = float(A)
                 out["A_input_g"] = float(A_g)
                 out["zeta"] = float(zeta)
                 out["T0"] = float(T0)
                 last = out
-                runs.append(out)
                 dt_hist.append(float(out["dt"]))
                 break
             except RuntimeError:
                 if dt <= dt_min + 1e-15:
-                    meta.update({
-                        "dt_hist": dt_hist,
-                        "amps_g_used": amps_g[:len(peak_drifts)],
-                        "runs": runs,
-                    })
+                    meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
                     return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
                 dt *= 0.5
 
@@ -332,11 +430,7 @@ def run_incremental_amplitudes(
         if pk >= drift_limit:
             break
 
-    meta.update({
-        "dt_hist": dt_hist,
-        "amps_g_used": amps_g[:len(peak_drifts)],
-        "runs": runs,
-    })
+    meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
     return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
 
 
@@ -378,65 +472,25 @@ def plot_results(
         field="both",
     )
 
-
-def _amp_tag(value: float) -> str:
-    return f"{value:.2f}g".replace(".", "p")
-
-
-def plot_results_all_phases(
-    model: Model,
-    meta: Dict,
-    drift_limit: float = 0.10,
-    snapshot_limit: Optional[float] = None,
-) -> None:
-    runs = meta.get("runs", [])
-    if not runs:
-        return
-    out = _outputs_dir()
-    H = float(meta.get("H", 1.0))
-    for run in runs:
-        ag = float(run.get("A_input_g", float("nan")))
-        tag = _amp_tag(ag)
-        plot_structure_states(
-            model,
-            run,
-            drift_height=H,
-            snapshot_limit=snapshot_limit,
-            outfile=str(out / f"problem4_{tag}_states_U.png"),
-            field="U",
-            shared_colorbar=True,
-        )
-        plot_structure_states(
-            model,
-            run,
-            drift_height=H,
-            snapshot_limit=snapshot_limit,
-            outfile=str(out / f"problem4_{tag}_states_S.png"),
-            field="S",
-            shared_colorbar=True,
-        )
-        plot_hinge_hysteresis(
-            model,
-            run,
-            outfile=str(out / f"problem4_{tag}_hinge_hysteresis.png"),
-            title=f"Hinge M-θ hysteresis (A_g={ag:.2f}g)",
-        )
-        plot_hinge_nm_interaction(
-            model,
-            run,
-            outfile=str(out / f"problem4_{tag}_hinge_nm.png"),
-            title=f"Hinge N-M interaction (A_g={ag:.2f}g)",
-        )
+    export_hinge_hysteresis_gradient(out, model, last, max_hinges=10)
 
 
 def main():
+
+    parser = argparse.ArgumentParser(description="Problema 4: pórtico con rótulas (time-history).")
+    parser.add_argument("--integrator", default="hht", choices=["hht", "newmark", "explicit"], help="Time integrator.")
+    parser.add_argument("--nlgeom", action="store_true", help="Enable geometric nonlinearity (P-Delta).")
+    parser.add_argument("--nseg", type=int, default=6, help="Segments per member (visualization/mesh).")
+    args = parser.parse_args()
+
     drift_limit = 0.10
     snapshot_limit = 0.04
     alpha = -0.05
-    nseg = 6
-    nlgeom = False
+    nseg = int(args.nseg)
+    nlgeom = bool(args.nlgeom)
 
     peak_drifts, amps_used, last, model, meta = run_incremental_amplitudes(
+        integrator=args.integrator,
         H=3.0,
         L=5.0,
         T0=0.5,
@@ -450,7 +504,6 @@ def main():
         nseg=nseg,
         nlgeom=nlgeom,
     )
-    plot_results_all_phases(model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit)
     plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit)
 
     out = _outputs_dir()
