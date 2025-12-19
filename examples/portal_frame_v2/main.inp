@@ -1,0 +1,7 @@
+** INPUT DECK V2
+** UNITS: SI (m, N, kg, s)
+*Include, input=geometry.inp
+*Include, input=materials.inp
+*Include, input=sections.inp
+*Include, input=steps_gravity.inp
+*Include, input=steps_dynamic.inp

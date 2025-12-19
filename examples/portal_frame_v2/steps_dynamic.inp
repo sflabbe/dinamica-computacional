@@ -1,0 +1,12 @@
+*Include, input=amplitudes/AMP_PORTAL.inp
+*Step, name=Dynamic, nlgeom=YES
+*Dynamic
+0.002, 2.0
+*Boundary, type=ACCELERATION, amplitude=AMP_PORTAL
+NS_BASE, 1, 1, 1.0
+*Output, history
+*Node Output, nset=NS_TOP_L
+U, UR, RF
+*Node Output, nset=NS_TOP_R
+U, UR, RF
+*End Step

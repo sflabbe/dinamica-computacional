@@ -43,6 +43,23 @@ pytest
 python -m dc_solver.run examples/abaqus_like/beam_cantilever_tipload.inp
 ```
 
+## Abaqus-like log files (.sta/.msg/.dat)
+
+Enable Abaqus-style logs for a run with `--abaqus-like-logs` (and optional
+`--output-dir` for where the files are written):
+
+```bash
+python -m dc_solver.run examples/abaqus_like/beam_cantilever_tipload.inp --abaqus-like-logs --output-dir results/beam_demo
+```
+
+This produces three files:
+
+- `<job>.sta`: status table by increment (STEP, INC, ATT, iteration counts, and times).
+- `<job>.msg`: step/increment/iteration messages suitable for `tail -f`.
+- `<job>.dat`: input echo, warnings, and a final summary.
+
+Legal note: this is an Abaqus-like layout for familiarity; not affiliated with Dassault Systèmes.
+
 ## Notes
 
 - This is intended for research/prototyping and coursework-level models.
@@ -60,6 +77,11 @@ Two simple beam benchmarks with closed-form Euler–Bernoulli comparisons live i
   - Midspan deflection: \u03b4 = P L^3 / (48 E I)
 
 See `tests/test_beam_benchmarks_theory.py` for the exact comparisons.
+Beam benchmark plots now show curvature; run:
+
+```bash
+python -m dc_solver.run examples/abaqus_like/beam_cantilever_tipload.inp
+```
 
 ## Input format
 

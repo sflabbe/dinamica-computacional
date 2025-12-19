@@ -1,0 +1,14 @@
+*Step, name=Gravity, nlgeom=NO
+*Static
+*Dload
+ES_COL_L, GRAV, 9.81, 0.0, -1.0, 0.0
+ES_COL_R, GRAV, 9.81, 0.0, -1.0, 0.0
+ES_BEAM, GRAV, 9.81, 0.0, -1.0, 0.0
+*Boundary
+NS_BASE, 1, 3
+*Output, field
+*Node Output, nset=NS_ALL
+U, UR, RF
+*Element Output, elset=ES_FRAME_ALL
+S, E
+*End Step
