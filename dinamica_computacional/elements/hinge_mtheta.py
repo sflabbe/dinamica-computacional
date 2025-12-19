@@ -96,6 +96,14 @@ class RotSpringElementMTheta:
         k_l = kM * (Bm.T @ Bm)
         f_l = (Bm.T * M).reshape(6)
 
+        k_trans = max(K0, 1.0) * 1e4
+        Bt = np.array([[-1, 0, 0, 1, 0, 0],
+                       [0, -1, 0, 0, 1, 0]], float)
+        u_loc = u_trial[dofs]
+        u_rel = Bt @ u_loc
+        k_l += k_trans * (Bt.T @ Bt)
+        f_l += Bt.T @ (k_trans * u_rel)
+
         self._trial = trial_state
         info = {"dtheta": float(dth_inc), "M": float(M)}
         info.update(info_extra)
