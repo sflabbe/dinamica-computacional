@@ -160,7 +160,12 @@ def _input_echo_lines(data) -> List[str]:
     return lines
 
 
-def run_inp(path: str, abaqus_like_logs: bool = False, output_dir: Optional[str] = None) -> None:
+def run_inp(
+    path: str,
+    abaqus_like_logs: bool = False,
+    output_dir: Optional[str] = None,
+    verbose: bool = False,
+) -> None:
     reporter = None
     exc: Optional[Exception] = None
     job_name = Path(path).stem
@@ -296,7 +301,7 @@ def run_inp(path: str, abaqus_like_logs: bool = False, output_dir: Optional[str]
                     alpha=-0.05,
                     max_iter=40,
                     tol=1e-6,
-                    verbose=False,
+                    verbose=verbose,
                     reporter=reporter.on_event if reporter is not None else None,
                     step_id=step_id,
                 )
@@ -390,8 +395,18 @@ def main() -> None:
         default=None,
         help="Directory for output logs when using --abaqus-like-logs.",
     )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print per-increment status data during the simulation.",
+    )
     args = parser.parse_args()
-    run_inp(args.inp_path, abaqus_like_logs=args.abaqus_like_logs, output_dir=args.output_dir)
+    run_inp(
+        args.inp_path,
+        abaqus_like_logs=args.abaqus_like_logs,
+        output_dir=args.output_dir,
+        verbose=args.status,
+    )
 
 
 if __name__ == "__main__":
