@@ -46,7 +46,7 @@ def _history_from_cycles(amplitudes: Iterable[float], steps_per_half: int = 40) 
     return np.asarray(series, dtype=float)
 
 
-def _build_histories() -> Dict[str, np.ndarray]:
+def _build_histories() -> Tuple[Dict[str, np.ndarray], np.ndarray]:
     eps_history = _history_from_cycles([2e-4, 4e-4, 6e-4], steps_per_half=50)
     th_history = _history_from_cycles([0.002, 0.004, 0.006], steps_per_half=50)
 
@@ -54,12 +54,16 @@ def _build_histories() -> Dict[str, np.ndarray]:
     eps_comb = 2.5e-4 * np.sin(t)
     th_comb = 0.007 * np.sin(2.0 * t + 0.3)
 
+    # NOTE:
+    # - "axial": prescribe ε history, θ=0
+    # - "combined": prescribe ε and θ
+    # - "flexion": *pure bending with N≈0*, so ε must be solved each step (force-control),
+    #   not imposed as ε=0 (which creates a large reaction N and a serrucho in M–θ).
     histories = {
         "axial": np.column_stack([eps_history, np.zeros_like(eps_history)]),
-        "flexion": np.column_stack([np.zeros_like(th_history), th_history]),
         "combined": np.column_stack([eps_comb, th_comb]),
     }
-    return histories
+    return histories, th_history
 
 
 def _make_hinge(section) -> Tuple[PlasticHingeNM, float, float]:
@@ -104,6 +108,74 @@ def _simulate_history(hinge: PlasticHingeNM, q_hist: np.ndarray) -> Dict[str, np
         "active": active,
         "max_violation": max_violation,
     }
+
+
+
+def _simulate_flexion_control_N(
+    hinge: PlasticHingeNM,
+    theta_hist: np.ndarray,
+    N_target: float = 0.0,
+    N_tol: float = 1.0e3,
+    max_iter: int = 25,
+) -> Dict[str, np.ndarray]:
+    """Pure flexion (Problema 2): prescribe θ(t) and solve ε increment so that N≈N_target (default 0).
+
+    Setting ε(t)=0 is axial restraint and generates large reaction N.
+    In an N–M coupled hinge this alters My(N) and produces a 'serrucho' artifact in M–θ.
+    This routine does proper axial force-control using a local Newton iteration on dε.
+    """
+    theta_hist = np.asarray(theta_hist, dtype=float).reshape(-1)
+    dth_hist = np.diff(theta_hist)
+    n_steps = dth_hist.shape[0]
+
+    q = np.zeros((n_steps, 2))
+    s = np.zeros((n_steps, 2))
+    s_trial = np.zeros((n_steps, 2))
+    q_p = np.zeros((n_steps, 2))
+    dq_p_inc = np.zeros((n_steps, 2))
+    active = np.zeros(n_steps, dtype=int)
+    max_violation = np.zeros(n_steps)
+
+    eps = 0.0
+    th = float(theta_hist[0])
+
+    for i, dth in enumerate(dth_hist):
+        deps = 0.0
+        for _ in range(max_iter):
+            info_t = hinge.update(np.array([deps, dth], dtype=float), commit=False)
+            N = float(info_t["s"][0])
+            r = N - float(N_target)
+            if abs(r) <= float(N_tol):
+                break
+            Kt = info_t.get("Kt", hinge.K)
+            dNdEps = float(Kt[0, 0])
+            if not np.isfinite(dNdEps) or abs(dNdEps) < 1e-12:
+                dNdEps = float(hinge.K[0, 0])
+            deps -= r / dNdEps
+
+        info = hinge.update(np.array([deps, dth], dtype=float), commit=True)
+
+        eps += deps
+        th += dth
+        q[i, :] = [eps, th]
+
+        s[i] = info["s"]
+        s_trial[i] = info["s_trial"]
+        dq_p_inc[i] = info["dq_p_inc"]
+        q_p[i] = info["q_p"]
+        active[i] = int(info["active"].size)
+        max_violation[i] = float(np.max(hinge.surface.A @ s[i] - hinge.surface.b))
+
+    return {
+        "q": q,
+        "s": s,
+        "s_trial": s_trial,
+        "q_p": q_p,
+        "dq_p_inc": dq_p_inc,
+        "active": active,
+        "max_violation": max_violation,
+    }
+
 
 
 def _plot_paths(out: Path, tag: str, surface, sims: Dict[str, Dict[str, np.ndarray]]) -> None:
@@ -168,7 +240,7 @@ def main() -> None:
         fig.savefig(out / f"problem2_interaction_{tag}_yield_hull.png", dpi=160)
         plt.close(fig)
 
-    histories = _build_histories()
+    histories, th_flex = _build_histories()
 
     for tag, section in ("S1", sec_s1), ("S2", sec_s2):
         hinge, _, _ = _make_hinge(section)
@@ -177,6 +249,11 @@ def main() -> None:
             hinge.s = np.zeros(2, float)
             hinge.q_p = np.zeros(2, float)
             sims[name] = _simulate_history(hinge, q_hist)
+
+        # Pure flexion with axial force control: keep N≈0 (no axial restraint)
+        hinge.s = np.zeros(2, float)
+        hinge.q_p = np.zeros(2, float)
+        sims["flexion"] = _simulate_flexion_control_N(hinge, th_flex, N_target=0.0)
 
         _plot_paths(out, tag, hinge.surface, sims)
         _plot_hysteresis(out, tag, sims)

@@ -10,6 +10,76 @@ import matplotlib.pyplot as plt
 from matplotlib import cm, colors
 from matplotlib.collections import LineCollection
 
+
+def plot_hysteresis_time_gradient(
+    x: np.ndarray,
+    y: np.ndarray,
+    t: np.ndarray | None = None,
+    *,
+    ax: Optional[plt.Axes] = None,
+    cmap: str = "plasma",
+    lw: float = 2.5,
+    add_colorbar: bool = True,
+    cbar_label: str = "normalized time",
+):
+    """
+    Plot y(x) with a time/step color gradient using a LineCollection.
+
+    Parameters
+    ----------
+    x, y : arrays
+        Curve coordinates.
+    t : array or None
+        Time/step array used for coloring. If None, uses normalized step index [0,1].
+    ax : matplotlib Axes or None
+        Target axes.
+    cmap : str
+        Colormap name.
+    lw : float
+        Line width.
+    add_colorbar : bool
+        Add a colorbar to the axes.
+    cbar_label : str
+        Label for the colorbar.
+
+    Returns
+    -------
+    lc : LineCollection
+        The created LineCollection (useful for shared colorbars).
+    """
+    if ax is None:
+        ax = plt.gca()
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if t is None:
+        t = np.linspace(0.0, 1.0, num=x.size)
+    else:
+        t = np.asarray(t, dtype=float)
+        # normalize to [0,1] for consistent colorbars
+        tmin = float(np.nanmin(t))
+        tmax = float(np.nanmax(t))
+        if tmax > tmin:
+            t = (t - tmin) / (tmax - tmin)
+        else:
+            t = np.zeros_like(t)
+
+    pts = np.column_stack([x, y]).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+
+    norm = colors.Normalize(vmin=0.0, vmax=1.0)
+    lc = LineCollection(segs, cmap=cmap, norm=norm)
+    lc.set_array(t[:-1])
+    lc.set_linewidth(lw)
+    ax.add_collection(lc)
+    ax.autoscale_view()
+
+    if add_colorbar:
+        cb = ax.figure.colorbar(lc, ax=ax)
+        cb.set_label(cbar_label)
+
+    return lc
+
 from dc_solver.fem.model import Model
 from dc_solver.fem.frame2d import rot2d
 

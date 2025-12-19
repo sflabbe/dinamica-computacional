@@ -46,7 +46,7 @@ def _history_from_cycles(amplitudes: Iterable[float], steps_per_half: int = 40) 
     return np.asarray(series, dtype=float)
 
 
-def _build_histories() -> Dict[str, np.ndarray]:
+def _build_histories() -> Tuple[Dict[str, np.ndarray], np.ndarray]:
     eps_history = _history_from_cycles([2e-4, 4e-4, 6e-4], steps_per_half=50)
     th_history = _history_from_cycles([0.002, 0.004, 0.006], steps_per_half=50)
 
@@ -54,12 +54,16 @@ def _build_histories() -> Dict[str, np.ndarray]:
     eps_comb = 2.5e-4 * np.sin(t)
     th_comb = 0.007 * np.sin(2.0 * t + 0.3)
 
+    # NOTE:
+    # - "axial": prescribe ε history, θ=0
+    # - "combined": prescribe ε and θ
+    # - "flexion": *pure bending with N≈0*, so ε must be solved each step (force-control),
+    #   not imposed as ε=0 (which creates a large reaction N and a serrucho in M–θ).
     histories = {
         "axial": np.column_stack([eps_history, np.zeros_like(eps_history)]),
-        "flexion": np.column_stack([np.zeros_like(th_history), th_history]),
         "combined": np.column_stack([eps_comb, th_comb]),
     }
-    return histories
+    return histories, th_history
 
 
 def _make_hinge(section) -> Tuple[PlasticHingeNM, float, float]:
@@ -108,6 +112,77 @@ def _simulate_history(hinge: PlasticHingeNM, q_hist: np.ndarray) -> Dict[str, np
         "active_count": active_count,
         "lam_norm": lam_norm,
     }
+
+
+
+def _simulate_flexion_control_N(
+    hinge: PlasticHingeNM,
+    theta_hist: np.ndarray,
+    N_target: float = 0.0,
+    N_tol: float = 1.0e3,
+    max_iter: int = 25,
+) -> Dict[str, np.ndarray]:
+    """Pure flexion (Problema 2): prescribe θ(t) and solve ε increment so that N≈N_target (default 0).
+
+    Keeps the same output fields as `_simulate_history` so the checks work unchanged.
+    """
+    theta_hist = np.asarray(theta_hist, dtype=float).reshape(-1)
+    dth_hist = np.diff(theta_hist)
+    n_steps = dth_hist.shape[0]
+
+    q = np.zeros((n_steps, 2))
+    s = np.zeros((n_steps, 2))
+    s_trial = np.zeros((n_steps, 2))
+    q_p = np.zeros((n_steps, 2))
+    dq_p_inc = np.zeros((n_steps, 2))
+    flow_check = np.zeros((n_steps, 2))
+    active_count = np.zeros(n_steps, dtype=int)
+    lam_norm = np.zeros(n_steps, dtype=float)
+
+    eps = 0.0
+    th = float(theta_hist[0])
+
+    for i, dth in enumerate(dth_hist):
+        deps = 0.0
+        for _ in range(max_iter):
+            info_t = hinge.update(np.array([deps, dth], dtype=float), commit=False)
+            N = float(info_t["s"][0])
+            r = N - float(N_target)
+            if abs(r) <= float(N_tol):
+                break
+            Kt = info_t.get("Kt", hinge.K)
+            dNdEps = float(Kt[0, 0])
+            if not np.isfinite(dNdEps) or abs(dNdEps) < 1e-12:
+                dNdEps = float(hinge.K[0, 0])
+            deps -= r / dNdEps
+
+        info = hinge.update(np.array([deps, dth], dtype=float), commit=True)
+
+        eps += deps
+        th += dth
+        q[i, :] = [eps, th]
+
+        s[i] = info["s"]
+        s_trial[i] = info["s_trial"]
+        dq_p_inc[i] = info["dq_p_inc"]
+        q_p[i] = info["q_p"]
+        flow_check[i] = info.get("flow_check", np.zeros(2))
+        active = info.get("active", np.zeros((0,), dtype=int))
+        lam = info.get("lam", np.zeros((0,)))
+        active_count[i] = int(active.size)
+        lam_norm[i] = float(np.linalg.norm(lam)) if lam.size else 0.0
+
+    return {
+        "q": q,
+        "s": s,
+        "s_trial": s_trial,
+        "q_p": q_p,
+        "dq_p_inc": dq_p_inc,
+        "flow_check": flow_check,
+        "active_count": active_count,
+        "lam_norm": lam_norm,
+    }
+
 
 
 def _evaluate_checks(surface, sim_data: Dict[str, np.ndarray]) -> Dict[str, float]:
@@ -196,7 +271,7 @@ def _plot_hysteresis(out: Path, tag: str, sims: Dict[str, Dict[str, np.ndarray]]
 
 def main() -> None:
     out = _outputs_dir()
-    histories = _build_histories()
+    histories, th_flex = _build_histories()
 
     results = []
 
@@ -214,6 +289,15 @@ def main() -> None:
             checks["section"] = tag
             checks["history"] = name
             results.append(checks)
+
+        # Pure flexion with axial force control: keep N≈0 (no axial restraint)
+        hinge = PlasticHingeNM(surface=surface, K=hinge.K.copy())
+        sim = _simulate_flexion_control_N(hinge, th_flex, N_target=0.0)
+        sims["flexion"] = sim
+        checks = _evaluate_checks(surface, sim)
+        checks["section"] = tag
+        checks["history"] = "flexion"
+        results.append(checks)
 
         _plot_paths(out, tag, surface, sims)
         _plot_hysteresis(out, tag, sims)
