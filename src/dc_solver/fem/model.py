@@ -9,14 +9,14 @@ import numpy as np
 
 from dc_solver.fem.nodes import Node
 from dc_solver.fem.frame2d import FrameElementLinear2D
-from dc_solver.hinges.models import RotSpringElement
+from dc_solver.hinges.models import RotSpringElement, HingeNM2DElement
 
 
 @dataclass
 class Model:
     nodes: List[Node]
     beams: List[FrameElementLinear2D]
-    hinges: List[RotSpringElement]
+    hinges: List[RotSpringElement | HingeNM2DElement]
     fixed_dofs: np.ndarray
     mass_diag: np.ndarray
     C_diag: np.ndarray
@@ -35,16 +35,8 @@ class Model:
 
     def reset_state(self) -> None:
         for h in self.hinges:
-            h._trial = None
-            if h.kind == "col_nm":
-                assert h.col_hinge is not None
-                h.col_hinge.th_p_comm = 0.0
-                h.col_hinge.M_comm = 0.0
-            else:
-                assert h.beam_hinge is not None
-                h.beam_hinge.th_p_comm = 0.0
-                h.beam_hinge.a_comm = 0.0
-                h.beam_hinge.M_comm = 0.0
+            if hasattr(h, "reset_state"):
+                h.reset_state()
 
     def update_column_yields(self, u_comm: np.ndarray) -> None:
         """Update My(N) for each column hinge based on the committed axial forces."""
@@ -54,8 +46,8 @@ class Model:
             N_beam.append(meta["N"])
         for hinge_idx, beam_idx, sign in self.col_hinge_groups:
             h = self.hinges[hinge_idx]
-            Nref = float(sign) * float(N_beam[beam_idx])
-            if h.col_hinge is not None:
+            if isinstance(h, RotSpringElement) and h.col_hinge is not None:
+                Nref = float(sign) * float(N_beam[beam_idx])
                 h.col_hinge.set_yield_from_N(Nref)
 
     def assemble(self, u_trial: np.ndarray, u_comm: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict]:

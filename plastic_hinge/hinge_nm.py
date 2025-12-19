@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import numpy as np
 
 from .nm_surface import NMSurfacePolygon
@@ -28,6 +28,9 @@ class PlasticHingeNM:
     K: np.ndarray               # 2x2 elastic stiffness (PD)
     q_p: np.ndarray = None      # 2,
     s: np.ndarray = None        # 2,
+    enable_substepping: bool = False
+    substep_tol: float = 0.05
+    substep_max: int = 12
 
     def __post_init__(self):
         self.K = np.asarray(self.K, float).reshape(2,2)
@@ -40,7 +43,62 @@ class PlasticHingeNM:
         else:
             self.s = np.asarray(self.s, float).reshape(2)
 
-    def update(self, dq: np.ndarray) -> Dict[str, np.ndarray]:
+    def _update_once_state(
+        self,
+        s: np.ndarray,
+        q_p: np.ndarray,
+        dq: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+        """Single-step update returning new (s, q_p) and info."""
+        dq = np.asarray(dq, float).reshape(2)
+
+        s_trial = s + self.K @ dq
+
+        if self.surface.is_inside(s_trial):
+            info = {
+                "s_trial": s_trial,
+                "s": s_trial.copy(),
+                "dq_p_inc": np.zeros(2),
+                "q_p": q_p.copy(),
+                "active": np.zeros((0,), int),
+                "lam": np.zeros((0,)),
+                "Kt": self.K.copy(),
+            }
+            return s_trial, q_p, info
+
+        W = np.linalg.inv(self.K)
+        proj = project_onto_polytope_2d(s_trial, self.surface.A, self.surface.b, W=W)
+        s_new = proj.x
+        dq_p_inc = np.linalg.inv(self.K) @ (s_trial - s_new)
+
+        q_p_new = q_p + dq_p_inc
+
+        if proj.active.size > 0:
+            Aact = self.surface.A[proj.active, :]
+            denom = Aact @ self.K @ Aact.T
+            try:
+                denom_inv = np.linalg.inv(denom)
+            except np.linalg.LinAlgError:
+                denom_inv = np.linalg.pinv(denom)
+            Kt = self.K - self.K @ Aact.T @ denom_inv @ Aact @ self.K
+            flow_check = Aact.T @ proj.lam
+        else:
+            Kt = self.K.copy()
+            flow_check = np.zeros(2)
+
+        info = {
+            "s_trial": s_trial,
+            "s": s_new.copy(),
+            "dq_p_inc": dq_p_inc,
+            "q_p": q_p_new.copy(),
+            "active": proj.active.copy(),
+            "lam": proj.lam.copy(),
+            "flow_check": flow_check,
+            "Kt": Kt,
+        }
+        return s_new, q_p_new, info
+
+    def update(self, dq: np.ndarray, commit: bool = True) -> Dict[str, np.ndarray]:
         """Incremental update with total generalized increment dq (2-vector).
 
         Returns dict with:
@@ -49,48 +107,27 @@ class PlasticHingeNM:
         """
         dq = np.asarray(dq, float).reshape(2)
 
-        # elastic predictor
-        s_trial = self.s + self.K @ (dq - 0.0)  # s_n + K*dq (plastic part applied in corrector)
-        # But we store q_p in stress mapping; use total q via implicit integration:
-        # Equivalent: s_trial = K (q_n + dq - q_p_n) = s_n + K*dq
-        # Corrector will compute s_{n+1} and update q_p.
+        dq = np.asarray(dq, float).reshape(2)
+        s_curr = self.s.copy()
+        q_p_curr = self.q_p.copy()
 
-        # If inside: accept elastic
-        if self.surface.is_inside(s_trial):
-            self.s = s_trial
-            return {
-                "s_trial": s_trial, "s": self.s.copy(),
-                "dq_p_inc": np.zeros(2), "q_p": self.q_p.copy(),
-                "active": np.zeros((0,), int), "lam": np.zeros((0,))
-            }
+        scale = max(1.0, float(np.max(np.abs(self.surface.b))))
+        s_trial = s_curr + self.K @ dq
+        f_trial = float(np.max(self.surface.A @ s_trial - self.surface.b))
+        nsub = 1
+        if self.enable_substepping and f_trial > self.substep_tol * scale:
+            nsub = min(self.substep_max, max(2, int(np.ceil(f_trial / (self.substep_tol * scale)))))
+        info: Dict[str, np.ndarray] = {}
+        for _ in range(nsub):
+            s_curr, q_p_curr, info = self._update_once_state(s_curr, q_p_curr, dq / nsub)
 
-        # plastic corrector = projection in metric W = K^{-1}
-        W = np.linalg.inv(self.K)
-        proj = project_onto_polytope_2d(s_trial, self.surface.A, self.surface.b, W=W)
-        s_new = proj.x
-
-        # Consistency: s_new = s_trial - K * dq_p_inc  => dq_p_inc = K^{-1}(s_trial - s_new)
-        dq_p_inc = np.linalg.inv(self.K) @ (s_trial - s_new)
-
-        # Associative flow for polyhedral surface:
-        # dq_p_inc lies in the cone spanned by the active constraint normals.
-        # The projection multipliers 'lam' are the KKT multipliers of equality constraints (>=0),
-        # and satisfy: W(s_new - s_trial) + A_act^T lam = 0
-        # With W=K^{-1}:  (s_trial - s_new) = K A_act^T lam  => dq_p_inc = A_act^T lam
-        # We'll report that as a check.
-        if proj.active.size > 0:
-            Aact = self.surface.A[proj.active, :]
-            flow_check = Aact.T @ proj.lam
+        info["nsub"] = np.array([nsub], dtype=int)
+        if commit:
+            self.s = s_curr
+            self.q_p = q_p_curr
+            info["s"] = self.s.copy()
+            info["q_p"] = self.q_p.copy()
         else:
-            flow_check = np.zeros(2)
-
-        # Update state
-        self.q_p = self.q_p + dq_p_inc
-        self.s = s_new
-
-        return {
-            "s_trial": s_trial, "s": self.s.copy(),
-            "dq_p_inc": dq_p_inc, "q_p": self.q_p.copy(),
-            "active": proj.active.copy(), "lam": proj.lam.copy(),
-            "flow_check": flow_check
-        }
+            info["s"] = s_curr.copy()
+            info["q_p"] = q_p_curr.copy()
+        return info

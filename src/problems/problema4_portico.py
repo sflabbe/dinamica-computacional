@@ -13,14 +13,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from plastic_hinge import RCSectionRect, RebarLayer, NMSurfacePolygon
+from plastic_hinge import RCSectionRect, RebarLayer, NMSurfacePolygon, PlasticHingeNM
 
 from dc_solver.fem.nodes import Node, DofManager
 from dc_solver.fem.frame2d import FrameElementLinear2D
 from dc_solver.fem.model import Model
 from dc_solver.fem.utils import discretize_member
 from dc_solver.hinges.models import (
-    ColumnHingeNMRot,
+    ColumnHingeNM2D,
+    HingeNM2DElement,
     SHMBeamHinge1D,
     RotSpringElement,
     moment_capacity_from_polygon,
@@ -139,14 +140,22 @@ def build_portal_beam_hinge(
     right_elems = add_member(right_nodes, A_col, I_col)
     beam_elems = add_member(beam_nodes, A_beam, I_beam)
 
+    Lp_col = 0.5 * h_col
     k_col0 = 6.0 * E * I_col / H
     k_beam0 = 6.0 * E * I_beam / L
+    KN_col = E * A_col / Lp_col
+    KM_col = E * I_col / Lp_col
 
-    hinges: List[RotSpringElement] = []
-    hinges.append(RotSpringElement(0, i0L, "col_nm", ColumnHingeNMRot(surface=surf_col, k0=k_col0), None, nodes))
-    hinges.append(RotSpringElement(2, i2L, "col_nm", ColumnHingeNMRot(surface=surf_col, k0=k_col0), None, nodes))
-    hinges.append(RotSpringElement(1, i1R, "col_nm", ColumnHingeNMRot(surface=surf_col, k0=k_col0), None, nodes))
-    hinges.append(RotSpringElement(3, i3R, "col_nm", ColumnHingeNMRot(surface=surf_col, k0=k_col0), None, nodes))
+    hinges: List[RotSpringElement | HingeNM2DElement] = []
+    hinge_left = ColumnHingeNM2D(
+        hinge=PlasticHingeNM(surface=surf_col, K=np.diag([KN_col, KM_col]), enable_substepping=True),
+    )
+    hinge_right = ColumnHingeNM2D(
+        hinge=PlasticHingeNM(surface=surf_col, K=np.diag([KN_col, KM_col]), enable_substepping=True),
+    )
+    hinges.append(HingeNM2DElement(0, i0L, hinge_left, nodes))
+    hinges.append(HingeNM2DElement(1, i1R, hinge_right, nodes))
+
     shm_left = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
     shm_right = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
     hinges.append(RotSpringElement(2, i2B, "beam_shm", None, shm_left, nodes))
@@ -179,10 +188,7 @@ def build_portal_beam_hinge(
         mass_diag=mass,
         C_diag=C,
         load_const=p0,
-        col_hinge_groups=[
-            (0, left_elems[0], +1), (1, left_elems[-1], +1),
-            (2, right_elems[0], +1), (3, right_elems[-1], +1),
-        ],
+        col_hinge_groups=[],
         nlgeom=nlgeom,
     )
 
