@@ -7,6 +7,7 @@ from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import cm, colors
 from matplotlib.collections import LineCollection
 
 from dc_solver.fem.model import Model
@@ -59,6 +60,36 @@ def nodal_displacement_magnitude(model: Model, u: Optional[np.ndarray]) -> np.nd
         ux, uy = nd.dof_u
         umag[i] = math.hypot(float(u[ux]), float(u[uy]))
     return umag
+
+
+def _normalize_field(field: Optional[str]) -> str:
+    if field is None:
+        return "both"
+    field_key = str(field).strip().lower()
+    aliases = {
+        "u": "u",
+        "disp": "u",
+        "displacement": "u",
+        "displacements": "u",
+        "s": "s",
+        "stress": "s",
+        "stresses": "s",
+        "both": "both",
+        "combined": "both",
+        "none": "none",
+        "geometry": "none",
+    }
+    if field_key in {"u", "s", "both", "none"}:
+        return field_key
+    return aliases.get(field_key, "both")
+
+
+def _field_cmap_label(field: str) -> Tuple[str, str]:
+    if field == "u":
+        return "viridis", "U, Magnitude [m]"
+    if field == "s":
+        return "plasma", "S, σ_abs,max [Pa]"
+    return "viridis", ""
 
 
 def _scaled_displacements(model: Model, u: Optional[np.ndarray], scale: float) -> Optional[np.ndarray]:
@@ -125,6 +156,50 @@ def member_stress_summary(model: Model, u: Optional[np.ndarray]) -> list[dict]:
     return summary
 
 
+def _member_displacement_magnitudes(
+    model: Model,
+    u: Optional[np.ndarray],
+    xi: np.ndarray,
+) -> np.ndarray:
+    if u is None:
+        return np.array([], dtype=float)
+    xy_ref = _node_xy(model, None)
+    values = []
+    for eb in model.beams:
+        i, _ = eb.ni, eb.nj
+        L, c, s = eb._geom()
+        x_local = xi * L
+        y_local = np.zeros_like(x_local)
+        base = xy_ref[i]
+        r = np.array([[c, -s], [s, c]])
+        ref_pts = base + (r @ np.vstack([x_local, y_local])).T
+
+        dofs = eb.dofs()
+        u_g = u[dofs]
+        u_l = rot2d(c, s) @ u_g
+        u_ax, v, _ = beam_local_displacements(xi, L, u_l)
+        def_pts = base + (r @ np.vstack([x_local + u_ax, v])).T
+        disp = def_pts - ref_pts
+        mags = np.linalg.norm(disp, axis=1)
+        values.extend(0.5 * (mags[:-1] + mags[1:]))
+    return np.asarray(values, dtype=float)
+
+
+def _field_values_for_state(model: Model, u: Optional[np.ndarray], field: str) -> np.ndarray:
+    if field == "u":
+        xi = np.linspace(0.0, 1.0, 21)
+        umag = nodal_displacement_magnitude(model, u)
+        member_vals = _member_displacement_magnitudes(model, u, xi)
+        if member_vals.size or umag.size:
+            return np.concatenate([umag, member_vals]) if umag.size else member_vals
+        return np.array([0.0], dtype=float)
+    if field == "s":
+        summary = member_stress_summary(model, u)
+        values = np.array([row["sigma_abs_max"] for row in summary], dtype=float)
+        return values if values.size else np.array([0.0], dtype=float)
+    return np.array([], dtype=float)
+
+
 def write_member_stress_csv(model: Model, u: np.ndarray, path: str) -> None:
     rows = member_stress_summary(model, u)
     with open(path, "w", encoding="utf-8") as f:
@@ -143,15 +218,23 @@ def plot_structure_state(
     title: str,
     scale: float = 1.0,
     show_node_ids: bool = True,
+    field: str = "both",
+    norm: Optional[colors.Normalize] = None,
+    add_colorbar: bool = True,
 ) -> None:
+    field_kind = _normalize_field(field)
     xy_ref = _node_xy(model, None)
     u_plot = _scaled_displacements(model, u, scale) if u is not None else None
     xy = _node_xy(model, u_plot)
 
     xi = np.linspace(0.0, 1.0, 21)
-    stress_summary = member_stress_summary(model, u) if u is not None else []
+    stress_summary = []
+    if field_kind == "s":
+        stress_summary = member_stress_summary(model, u)
+    elif field_kind == "both" and u is not None:
+        stress_summary = member_stress_summary(model, u)
     segments = []
-    stresses = []
+    field_values = []
     for idx, eb in enumerate(model.beams):
         i, _ = eb.ni, eb.nj
         L, c, s = eb._geom()
@@ -174,27 +257,69 @@ def plot_structure_state(
             u_l = rot2d(c, s) @ u_g
             u_ax, v, _ = beam_local_displacements(xi, L, u_l)
             def_pts = base + (r @ np.vstack([x_local + u_ax, v])).T
-            for a, b in zip(def_pts[:-1], def_pts[1:]):
-                segments.append([(float(a[0]), float(a[1])), (float(b[0]), float(b[1]))])
-                if stress_summary:
-                    stresses.append(stress_summary[idx]["sigma_abs_max"])
+        else:
+            def_pts = ref_pts
 
-    if segments:
-        lc = LineCollection(segments, array=np.array(stresses), cmap="plasma", linewidths=2.2, zorder=2)
+        if field_kind == "none":
+            if u_plot is not None:
+                ax.plot(def_pts[:, 0], def_pts[:, 1], linewidth=1.6, color="0.2", zorder=2)
+            continue
+
+        if field_kind in {"u", "s", "both"}:
+            if field_kind == "both" and u_plot is None:
+                continue
+            if field_kind == "u" and u is not None:
+                dofs_mag = eb.dofs()
+                u_g_mag = u[dofs_mag]
+                u_l_mag = rot2d(c, s) @ u_g_mag
+                u_ax_mag, v_mag, _ = beam_local_displacements(xi, L, u_l_mag)
+                def_pts_mag = base + (r @ np.vstack([x_local + u_ax_mag, v_mag])).T
+                disp_mag = np.linalg.norm(def_pts_mag - ref_pts, axis=1)
+            else:
+                disp_mag = np.zeros_like(xi)
+
+            for seg_idx, (a, b) in enumerate(zip(def_pts[:-1], def_pts[1:])):
+                segments.append([(float(a[0]), float(a[1])), (float(b[0]), float(b[1]))])
+                if field_kind == "u":
+                    field_values.append(float(0.5 * (disp_mag[seg_idx] + disp_mag[seg_idx + 1])))
+                elif stress_summary:
+                    field_values.append(float(stress_summary[idx]["sigma_abs_max"]))
+
+    if segments and field_kind in {"u", "s", "both"}:
+        cmap_name, label = _field_cmap_label(field_kind)
+        lc = LineCollection(
+            segments,
+            array=np.array(field_values),
+            cmap=cmap_name,
+            norm=norm,
+            linewidths=2.2,
+            zorder=2,
+        )
         ax.add_collection(lc)
-        ax.figure.colorbar(lc, ax=ax, label="σ_max [Pa]")
+        if add_colorbar:
+            if field_kind == "both":
+                ax.figure.colorbar(lc, ax=ax, label="σ_max [Pa]")
+            else:
+                ax.figure.colorbar(lc, ax=ax, label=label)
 
     for hidx, h in enumerate(model.hinges):
         i = h.ni
         ax.scatter([xy[i, 0]], [xy[i, 1]], s=60, marker="o")
         ax.text(xy[i, 0], xy[i, 1], f"H{hidx}", fontsize=8, ha="left", va="bottom")
 
-    if u is None:
-        ax.scatter(xy[:, 0], xy[:, 1], s=26, color="0.2", zorder=3)
-    else:
+    if field_kind == "u":
         umag = nodal_displacement_magnitude(model, u)
-        scatter = ax.scatter(xy[:, 0], xy[:, 1], s=26, c=umag, cmap="viridis", zorder=3)
-        ax.figure.colorbar(scatter, ax=ax, label="|u| [m]")
+        ax.scatter(xy[:, 0], xy[:, 1], s=26, c=umag, cmap="viridis", norm=norm, zorder=3)
+    elif field_kind == "both":
+        if u is None:
+            ax.scatter(xy[:, 0], xy[:, 1], s=26, color="0.2", zorder=3)
+        else:
+            umag = nodal_displacement_magnitude(model, u)
+            scatter = ax.scatter(xy[:, 0], xy[:, 1], s=26, c=umag, cmap="viridis", zorder=3)
+            if add_colorbar:
+                ax.figure.colorbar(scatter, ax=ax, label="|u| [m]")
+    else:
+        ax.scatter(xy[:, 0], xy[:, 1], s=26, color="0.2", zorder=3)
     if show_node_ids:
         span = max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]))
         offset = 0.01 * (span if span > 0 else 1.0)
@@ -236,7 +361,10 @@ def plot_structure_states(
     outfile: str = "problem4_states_members.png",
     benchmark_kind: Optional[str] = None,
     benchmark_report: Optional[Dict[str, float]] = None,
+    field: str = "both",
+    shared_colorbar: bool = False,
 ) -> None:
+    field_kind = _normalize_field(field)
     if snapshot_limit is None:
         snapshot_limit = float(last.get("snapshot_limit", 0.04))
     u_hist = last.get("u", None)
@@ -312,11 +440,39 @@ def plot_structure_states(
         fig, axs = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 4.8 * nrows), constrained_layout=True)
         axs = np.atleast_1d(axs).ravel()
 
+    norm = None
+    if shared_colorbar and field_kind in {"u", "s"}:
+        values = []
+        for _, u_state in states:
+            values.extend(_field_values_for_state(model, u_state, field_kind))
+        values = np.array(values, dtype=float)
+        if values.size:
+            vmin = float(np.nanmin(values))
+            vmax = float(np.nanmax(values))
+            if math.isclose(vmin, vmax):
+                vmax = vmin + 1e-12
+            norm = colors.Normalize(vmin=vmin, vmax=vmax)
+
     for ax, (title, u_state) in zip(axs, states):
-        plot_structure_state(ax, model, u_state, title, scale=scale)
+        plot_structure_state(
+            ax,
+            model,
+            u_state,
+            title,
+            scale=scale,
+            field=field_kind,
+            norm=norm,
+            add_colorbar=not (shared_colorbar and field_kind in {"u", "s"}),
+        )
 
     for ax in axs[len(states):]:
         ax.axis("off")
+
+    if shared_colorbar and field_kind in {"u", "s"} and norm is not None:
+        cmap_name, label = _field_cmap_label(field_kind)
+        sm = cm.ScalarMappable(norm=norm, cmap=cmap_name)
+        sm.set_array([])
+        fig.colorbar(sm, ax=axs[:len(states)], label=label)
 
     fig.savefig(outfile, dpi=170)
     plt.close(fig)
