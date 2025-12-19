@@ -143,3 +143,20 @@ class FrameElementLinear2D:
 
         T = rot2d(c, s)
         return T.T @ f_l
+
+    def end_forces_local(self, u: np.ndarray) -> Dict[str, float]:
+        """Return element end forces in local coordinates."""
+        L, c, s = self._geom()
+        _ = L
+        T = rot2d(c, s)
+        dofs = self.dofs()
+        u_g = u[dofs]
+        u_l = T @ u_g
+        f_l = self.k_local() @ u_l
+        return {
+            "N": float(f_l[0]),
+            "Vi": float(f_l[1]),
+            "Mi": float(f_l[2]),
+            "Vj": float(f_l[4]),
+            "Mj": float(f_l[5]),
+        }

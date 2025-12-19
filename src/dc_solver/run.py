@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Tuple
 
 import numpy as np
 
-from dc_solver.io.abaqus_inp import parse_inp, build_model, apply_gravity, amplitude_series
+from dc_solver.io.abaqus_inp import parse_inp, build_model, apply_gravity, apply_cloads, amplitude_series
 from dc_solver.integrators.hht_alpha import hht_alpha_newton
-from dc_solver.post.plotting import plot_structure_states
+from dc_solver.post.plotting import plot_structure_states, write_member_stress_csv
 from dc_solver.static.newton import solve_static_newton
 
 
@@ -42,6 +43,8 @@ def run_inp(path: str) -> None:
             apply_gravity(model, data, current_gravity)
 
         if step.kind == "STATIC":
+            if step.cloads:
+                apply_cloads(model, data, step)
             u_static = solve_static_newton(model, model.load_const)
             last = {"t": np.array([0.0]), "u": np.array([u_static]), "drift": np.array([0.0])}
         elif step.kind == "DYNAMIC":
@@ -76,8 +79,16 @@ def run_inp(path: str) -> None:
 
     if last is not None:
         base_nodes, drift_nodes, height = _extreme_nodes_by_y(model)
-        plot_structure_states(model, last, drift_height=height, snapshot_limit=0.04,
-                              outfile="portal_states.png")
+        prefix = Path(path).with_suffix("")
+        plot_structure_states(
+            model,
+            last,
+            drift_height=height,
+            snapshot_limit=0.04,
+            outfile=f"{prefix.name}_states.png",
+        )
+        u_last = last["u"][-1]
+        write_member_stress_csv(model, u_last, f"{prefix.name}_member_stress.csv")
 
 
 def main() -> None:

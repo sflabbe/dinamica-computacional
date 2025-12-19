@@ -41,6 +41,7 @@ class StepData:
     dt: float = 0.0
     gravity: Optional[Tuple[float, float]] = None
     accel_bc: Optional[Tuple[str, int, float, Optional[str]]] = None
+    cloads: List[Tuple[str, int, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -83,7 +84,7 @@ def parse_inp(path: str) -> ModelData:
     supported = {
         "PART", "NODE", "ELEMENT", "NSET", "ELSET", "BEAM SECTION", "MATERIAL",
         "ELASTIC", "DENSITY", "ASSEMBLY", "INSTANCE", "END INSTANCE", "END ASSEMBLY",
-        "STEP", "STATIC", "DYNAMIC", "DLOAD", "BOUNDARY", "AMPLITUDE", "END STEP",
+        "STEP", "STATIC", "DYNAMIC", "DLOAD", "CLOAD", "BOUNDARY", "AMPLITUDE", "END STEP",
     }
 
     with open(path, "r", encoding="utf-8") as f:
@@ -179,13 +180,6 @@ def parse_inp(path: str) -> ModelData:
                         dof2 = int(fields[2])
                         value = float(fields[3]) if len(fields) > 3 else 0.0
                         boundaries.append((set_name, dof1, dof2, value))
-                fields = [f.strip() for f in line.split(",") if f.strip()]
-                if len(fields) >= 3:
-                    set_name = fields[0]
-                    dof1 = int(fields[1])
-                    dof2 = int(fields[2])
-                    value = float(fields[3]) if len(fields) > 3 else 0.0
-                    boundaries.append((set_name, dof1, dof2, value))
             elif current_keyword == "STATIC":
                 if current_step is not None:
                     current_step.kind = "STATIC"
@@ -204,6 +198,15 @@ def parse_inp(path: str) -> ModelData:
                     gy = float(fields[4]) * g
                     if current_step is not None:
                         current_step.gravity = (gx, gy)
+            elif current_keyword == "CLOAD":
+                if current_step is None:
+                    continue
+                fields = [f.strip() for f in line.split(",") if f.strip()]
+                if len(fields) >= 3:
+                    target = fields[0]
+                    dof = int(fields[1])
+                    value = float(fields[2])
+                    current_step.cloads.append((target, dof, value))
             elif current_keyword == "AMPLITUDE" and current_amp:
                 fields = [f.strip() for f in line.split(",") if f.strip()]
                 if len(fields) >= 2:
@@ -226,6 +229,17 @@ def parse_inp(path: str) -> ModelData:
 
 def _expand_generate(start: int, end: int, step: int) -> List[int]:
     return list(range(start, end + 1, step))
+
+
+def _node_map_from_part(data: ModelData) -> Dict[int, int]:
+    return {nid: idx for idx, (nid, _) in enumerate(sorted(data.part.nodes.items()))}
+
+
+def _collect_nsets(data: ModelData) -> Dict[str, List[int]]:
+    nsets = {name: ids[:] for name, ids in data.part.nsets.items()}
+    for name, gen in data.part.nset_generate.items():
+        nsets[name] = _expand_generate(*gen)
+    return nsets
 
 
 def build_model(data: ModelData, nlgeom: bool = False) -> Model:
@@ -273,9 +287,7 @@ def build_model(data: ModelData, nlgeom: bool = False) -> Model:
         mass[dofs[3]] += 0.5 * m
 
     fixed_dofs: List[int] = []
-    nsets = {name: ids[:] for name, ids in data.part.nsets.items()}
-    for name, gen in data.part.nset_generate.items():
-        nsets[name] = _expand_generate(*gen)
+    nsets = _collect_nsets(data)
     for name, dof1, dof2, value in data.boundaries:
         node_ids = nsets.get(name, [])
         for nid in node_ids:
@@ -303,6 +315,33 @@ def build_model(data: ModelData, nlgeom: bool = False) -> Model:
         nlgeom=nlgeom,
     )
     return model
+
+
+def apply_cloads(model: Model, data: ModelData, step: StepData) -> None:
+    nsets = _collect_nsets(data)
+    node_map = _node_map_from_part(data)
+    for target, dof, value in step.cloads:
+        if target in nsets:
+            node_ids = nsets[target]
+        else:
+            try:
+                node_ids = [int(target)]
+            except ValueError as exc:
+                raise ValueError(f"Unknown node or nset '{target}' in *CLOAD.") from exc
+        for nid in node_ids:
+            idx = node_map.get(nid, None)
+            if idx is None:
+                continue
+            node = model.nodes[idx]
+            dofs = node.dof_u + (node.dof_th,)
+            if dof == 1:
+                model.load_const[dofs[0]] += value
+            elif dof == 2:
+                model.load_const[dofs[1]] += value
+            elif dof == 3:
+                model.load_const[dofs[2]] += value
+            else:
+                raise ValueError(f"Unsupported DOF {dof} in *CLOAD.")
 
 
 def apply_gravity(model: Model, data: ModelData, gravity: Tuple[float, float]) -> None:

@@ -26,34 +26,45 @@ based on a **convex polygonal interaction surface** and a **closest-point / retu
 python -m examples.demo_interaction_and_hinge
 ```
 
-## New engine + Abaqus-like input
+## dc_solver engine + Abaqus-like input
 
-The newer analysis engine can read Abaqus-like `.inp` files via
-`dinamica_computacional.io.abaqus_like.read_inp`. A ready-to-run example is:
+The canonical analysis engine lives in `src/dc_solver` and reads Abaqus-like
+`.inp` files. A ready-to-run example is:
 
 ```bash
-python -m examples.demo_frame --input inputs/portal_problem4.inp --prefix problem4
+python -m dc_solver.run examples/abaqus_like/portal_6seg.inp
 ```
 
-Key input cards and parameters:
+Quickstart:
 
-- `*HINGE_NM_PARAMS, ELSET=..., SURFACE=...`
-  - `K0` (initial rotational stiffness)
-  - `ALPHA_POST` (post-yield stiffness ratio; default `1e-4`)
-  - `SURFACE` (name of the `*NMSURFACE` polygon)
-- `*HINGE_MTHETA_SHM_PARAMS, ELSET=...`
-  - `K0` (initial rotational stiffness)
-  - `MY` (yield moment)
-  - `ALPHA_POST` (post-yield stiffness ratio; default `0.02`)
-  - `CK` (strength deterioration coefficient; default `2.0`)
-  - `CMY` (yield strength deterioration coefficient; default `1.0`)
-- `*HHT, ALPHA=...` with `t_start, t_end, dt` for HHT-alpha dynamic steps.
+```bash
+pip install -e .[dev]
+pytest
+python -m dc_solver.run examples/abaqus_like/beam_cantilever_tipload.inp
+```
 
 ## Notes
 
 - This is intended for research/prototyping and coursework-level models.
 - Replace the default elastic stiffness extraction (`hinge_factory.py`) with your preferred EA/EI calibration.
 
+## Benchmarks
+
+Two simple beam benchmarks with closed-form Euler–Bernoulli comparisons live in
+`examples/abaqus_like/`:
+
+- Cantilever with tip point load:
+  - Tip deflection: \u03b4 = P L^3 / (3 E I)
+  - Tip rotation: \u03b8 = P L^2 / (2 E I)
+- Simply supported beam with midspan point load:
+  - Midspan deflection: \u03b4 = P L^3 / (48 E I)
+
+See `tests/test_beam_benchmarks_theory.py` for the exact comparisons.
+
+## Input format
+
+Supported Abaqus-like cards, limitations, and examples are documented in
+`docs/INPUT_FORMAT.md`.
 
 ## Example: Pórtico (Problema 4) — Beam elements + 6 rótulas
 
@@ -71,8 +82,6 @@ Genera:
 - `problem4_dt_sensitivity_*.png` + `problem4_dt_sensitivity.csv` (sensitividad en dt)
 
 **Criterio de colapso por drift (default): 10% (snapshot/etiquetas a 4%)**
-
-# dinamica-computacional
 
 ## Development
 
