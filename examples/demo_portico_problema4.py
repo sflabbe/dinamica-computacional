@@ -62,53 +62,60 @@ def colored_line(ax, x, y, t, linewidth=2.0, cmap="viridis", label=None):
 # -----------------------------
 # Plot: structure states (members + hinges)
 # -----------------------------
-def _node_xy(model: Model, u: Optional[np.ndarray] = None) -> np.ndarray:
-    """Return nodal coordinates (nnode,2). If u given, apply translational DOFs."""
-    xy = np.array([[nd.x, nd.y] for nd in model.nodes], dtype=float)
-    if u is None:
-        return xy
-    for i, nd in enumerate(model.nodes):
-        ux, uy = nd.dof_u
-        xy[i, 0] += float(u[ux])
-        xy[i, 1] += float(u[uy])
-    return xy
+def plot_deformed_mesh(ax, nodes, elements, u, dofmap, scale: float = 1.0, label_elems: bool = True):
+    """Draw undeformed + deformed mesh using explicit connectivity."""
+    colors = {"COL": "tab:blue", "BEAM": "tab:orange"}
+    for elem in elements:
+        ni, nj = int(elem["ni"]), int(elem["nj"])
+        xi, yi = nodes[ni]
+        xj, yj = nodes[nj]
+        # undeformed
+        ax.plot([xi, xj], [yi, yj], color="0.75", linewidth=1.0, zorder=1)
 
+        if u is None:
+            xi_d, yi_d = xi, yi
+            xj_d, yj_d = xj, yj
+        else:
+            uxi, uyi = dofmap[ni]
+            uxj, uyj = dofmap[nj]
+            xi_d = xi + scale * float(u[uxi])
+            yi_d = yi + scale * float(u[uyi])
+            xj_d = xj + scale * float(u[uxj])
+            yj_d = yj + scale * float(u[uyj])
 
-def plot_structure_state(ax, model: Model, u: Optional[np.ndarray], title: str, scale: float = 1.0):
-    """Plot member centerlines and hinge locations for a given displacement state."""
-    # apply visual scale (only for translations)
-    if u is None:
-        u_plot = None
-    else:
-        u_plot = u.copy()
-        for nd in model.nodes:
-            ux, uy = nd.dof_u
-            u_plot[ux] *= scale
-            u_plot[uy] *= scale
+        ax.plot([xi_d, xj_d], [yi_d, yj_d],
+                color=colors.get(elem.get("prop", ""), "tab:blue"),
+                linewidth=2.0, zorder=2)
 
-    xy = _node_xy(model, u_plot)
+        if label_elems:
+            xm = 0.5 * (xi_d + xj_d)
+            ym = 0.5 * (yi_d + yj_d)
+            ax.text(xm, ym, f"E{elem['eid']}", fontsize=7, ha="center", va="center")
 
-    # beams (members)
-    for eidx, eb in enumerate(model.beams):
-        i, j = eb.ni, eb.nj
-        ax.plot([xy[i, 0], xy[j, 0]], [xy[i, 1], xy[j, 1]], linewidth=2.5)
-        xm, ym = 0.5 * (xy[i, 0] + xy[j, 0]), 0.5 * (xy[i, 1] + xy[j, 1])
-        ax.text(xm, ym, f"B{eidx}", fontsize=8, ha="center", va="center")
-
-    # hinges (locations)
-    for hidx, h in enumerate(model.hinges):
-        i = h.ni
-        ax.scatter([xy[i, 0]], [xy[i, 1]], s=60, marker="o")
-        ax.text(xy[i, 0], xy[i, 1], f"H{hidx}", fontsize=8, ha="left", va="bottom")
-
-    # joints
-    ax.scatter(xy[:, 0], xy[:, 1], s=12, marker=".", zorder=3)
-
-    ax.set_title(title)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True)
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
+
+
+def plot_structure_state(ax, model: Model, u: Optional[np.ndarray], title: str, scale: float = 1.0):
+    """Plot member centerlines and hinge locations for a given displacement state."""
+    nodes = {i: (nd.x, nd.y) for i, nd in enumerate(model.nodes)}
+    dofmap = {i: nd.dof_u for i, nd in enumerate(model.nodes)}
+    plot_deformed_mesh(ax, nodes, model.elements_meta, u, dofmap, scale=scale, label_elems=True)
+
+    # hinges (locations)
+    for hidx, h in enumerate(model.hinges):
+        i = h.nj
+        xi, yi = nodes[i]
+        if u is not None:
+            ux, uy = dofmap[i]
+            xi += scale * float(u[ux])
+            yi += scale * float(u[uy])
+        ax.scatter([xi], [yi], s=60, marker="o", zorder=3)
+        ax.text(xi, yi, f"H{hidx}", fontsize=8, ha="left", va="bottom")
+
+    ax.set_title(title)
 
 
 def plot_structure_states(
@@ -148,13 +155,14 @@ def plot_structure_states(
                 if k_snap >= 0 and k_snap < u_hist.shape[0]:
                     u_snap = u_hist[k_snap].copy()
 
-    # auto scale for visibility across all plotted states
+    # auto scale for visibility across all plotted states (translations only)
     span = max(nd.x for nd in model.nodes) - min(nd.x for nd in model.nodes)
     span = float(span) if span > 0 else 1.0
     scale = 1.0
     u_for_scale = [u for u in (u_static, u_peak, u_snap) if u is not None]
     if u_for_scale:
-        umax = max(float(np.max(np.abs(u))) for u in u_for_scale if u.size)
+        trans_dofs = [d for nd in model.nodes for d in nd.dof_u]
+        umax = max(float(np.max(np.abs(u[trans_dofs]))) for u in u_for_scale if u.size)
         if umax > 0:
             target = 0.10 * span
             scale = min(80.0, target / umax)
@@ -937,6 +945,7 @@ class Model:
     nodes: List[Node]
     beams: List[FrameElementLinear2D]
     hinges: List[RotSpringElement]
+    elements_meta: List[Dict[str, object]]
     fixed_dofs: np.ndarray
     mass_diag: np.ndarray
     C_diag: np.ndarray
@@ -1237,20 +1246,72 @@ def hht_alpha_newton(model: Model,
 # -----------------------------
 # Model builder
 # -----------------------------
+def build_portal_mesh(H: float, L: float, nseg: int = 6):
+    """
+    Returns:
+      nodes: dict[node_id] = (x,y)
+      elements: list of dicts with fields:
+          {"eid": int, "type": "BEAM2D", "ni": int, "nj": int, "prop": "COL"|"BEAM"}
+    """
+    if nseg < 1:
+        raise ValueError("nseg must be >= 1")
+
+    nodes: Dict[int, Tuple[float, float]] = {
+        0: (0.0, 0.0),
+        1: (L, 0.0),
+        2: (0.0, H),
+        3: (L, H),
+    }
+    next_id = 4
+
+    def add_node(x: float, y: float) -> int:
+        nonlocal next_id
+        nid = next_id
+        nodes[nid] = (float(x), float(y))
+        next_id += 1
+        return nid
+
+    def segment_nodes(n_start: int, n_end: int, x0: float, y0: float, x1: float, y1: float) -> List[int]:
+        ids = [n_start]
+        for i in range(1, nseg):
+            t = i / nseg
+            ids.append(add_node(x0 + t * (x1 - x0), y0 + t * (y1 - y0)))
+        ids.append(n_end)
+        return ids
+
+    left_nodes = segment_nodes(0, 2, 0.0, 0.0, 0.0, H)
+    right_nodes = segment_nodes(1, 3, L, 0.0, L, H)
+    beam_nodes = segment_nodes(2, 3, 0.0, H, L, H)
+
+    elements: List[Dict[str, object]] = []
+    eid = 0
+    for i in range(nseg):
+        elements.append({"eid": eid, "type": "BEAM2D", "ni": left_nodes[i], "nj": left_nodes[i + 1], "prop": "COL"})
+        eid += 1
+    for i in range(nseg):
+        elements.append({"eid": eid, "type": "BEAM2D", "ni": right_nodes[i], "nj": right_nodes[i + 1], "prop": "COL"})
+        eid += 1
+    for i in range(nseg):
+        elements.append({"eid": eid, "type": "BEAM2D", "ni": beam_nodes[i], "nj": beam_nodes[i + 1], "prop": "BEAM"})
+        eid += 1
+
+    return nodes, elements
+
+
 def build_portal_beam_hinge(H: float = 3.0,
                             L: float = 5.0,
                             T0: float = 0.5,
                             zeta: float = 0.02,
                             P_gravity_total: float = 1500e3) -> Tuple[Model, Dict]:
     dm = DofManager()
+    nseg = 6
+    mesh_nodes, elements_meta = build_portal_mesh(H, L, nseg=nseg)
 
     # physical joint nodes (unique translations & rotations)
-    n0 = Node(0.0, 0.0, dm.new_trans(), dm.new_rot())
-    n1 = Node(L,   0.0, dm.new_trans(), dm.new_rot())
-    n2 = Node(0.0, H,   dm.new_trans(), dm.new_rot())
-    n3 = Node(L,   H,   dm.new_trans(), dm.new_rot())
-
-    nodes: List[Node] = [n0, n1, n2, n3]
+    nodes: List[Node] = []
+    for nid in range(len(mesh_nodes)):
+        x, y = mesh_nodes[nid]
+        nodes.append(Node(x, y, dm.new_trans(), dm.new_rot()))
 
     # hinge-side nodes: share translations with the corresponding joint, but have own rotation
     def aux_at(j: int) -> int:
@@ -1267,6 +1328,26 @@ def build_portal_beam_hinge(H: float = 3.0,
     # beam hinge nodes
     i2B = aux_at(2)
     i3B = aux_at(3)
+
+    # detach member ends from joints -> interface nodes
+    elements_meta = [dict(elem) for elem in elements_meta]
+    eid_left_start = 0
+    eid_right_start = nseg
+    eid_beam_start = 2 * nseg
+    for elem in elements_meta:
+        eid = int(elem["eid"])
+        if eid == eid_left_start:
+            elem["ni"] = i0L
+        if eid == eid_left_start + nseg - 1:
+            elem["nj"] = i2L
+        if eid == eid_right_start:
+            elem["ni"] = i1R
+        if eid == eid_right_start + nseg - 1:
+            elem["nj"] = i3R
+        if eid == eid_beam_start:
+            elem["ni"] = i2B
+        if eid == eid_beam_start + nseg - 1:
+            elem["nj"] = i3B
 
     # section placeholders (puedes reemplazar por las del Problema 2)
     fc = 30e6
@@ -1294,12 +1375,14 @@ def build_portal_beam_hinge(H: float = 3.0,
     # Elastic properties (tune if needed)
     E = 30e9
 
-    # Beams (elastic): connect member-side nodes
-    beams = [
-        FrameElementLinear2D(i0L, i2L, E=E, A=A_col, I=I_col, nodes=nodes),  # left column
-        FrameElementLinear2D(i1R, i3R, E=E, A=A_col, I=I_col, nodes=nodes),  # right column
-        FrameElementLinear2D(i2B, i3B, E=E, A=A_beam, I=I_beam, nodes=nodes),  # top beam
-    ]
+    # Beam elements (elastic): connect mesh nodes
+    beams: List[FrameElementLinear2D] = []
+    for elem in elements_meta:
+        if elem["prop"] == "COL":
+            A, I = A_col, I_col
+        else:
+            A, I = A_beam, I_beam
+        beams.append(FrameElementLinear2D(int(elem["ni"]), int(elem["nj"]), E=E, A=A, I=I, nodes=nodes))
 
     # Hinge initial rotational stiffness ~ (EI/L)*c
     k_col0 = 6.0 * E * I_col / H
@@ -1330,17 +1413,28 @@ def build_portal_beam_hinge(H: float = 3.0,
     C = np.zeros(nd)
     p0 = np.zeros(nd)
 
-    # gravity loads at top translations (uy)
-    p0[nodes[2].dof_u[1]] += -0.5 * P_gravity_total
-    p0[nodes[3].dof_u[1]] += -0.5 * P_gravity_total
+    # gravity loads on top beam nodes (consistent nodal forces)
+    w = P_gravity_total / L
+    for elem in elements_meta:
+        if elem["prop"] != "BEAM":
+            continue
+        ni = int(elem["ni"])
+        nj = int(elem["nj"])
+        xi, yi = nodes[ni].x, nodes[ni].y
+        xj, yj = nodes[nj].x, nodes[nj].y
+        le = math.hypot(xj - xi, yj - yi)
+        f_node = -w * le / 2.0
+        p0[nodes[ni].dof_u[1]] += f_node
+        p0[nodes[nj].dof_u[1]] += f_node
 
     # temporary model (mass will be calibrated)
     model = Model(nodes=nodes, beams=beams, hinges=hinges,
+                  elements_meta=elements_meta,
                   fixed_dofs=fixed, mass_diag=mass, C_diag=C, load_const=p0,
                   col_hinge_groups=[
                       # map each column hinge to its column beam
-                      (0, 0, +1), (1, 0, +1),
-                      (2, 1, +1), (3, 1, +1),
+                      (0, eid_left_start, +1), (1, eid_left_start + nseg - 1, +1),
+                      (2, eid_right_start, +1), (3, eid_right_start + nseg - 1, +1),
                   ])
 
     # --- Calibrate mass to hit T0 ---
@@ -1355,7 +1449,8 @@ def build_portal_beam_hinge(H: float = 3.0,
     C[:] = 2.0 * zeta * omega0 * mass
 
     meta = {"K_story": K_story, "M_total": M_total, "T0": T0, "omega0": omega0,
-            "section_col": sec_col, "surface_col": surf_col}
+            "section_col": sec_col, "surface_col": surf_col,
+            "H": float(H), "L": float(L), "nseg": int(nseg)}
     return model, meta
 
 
