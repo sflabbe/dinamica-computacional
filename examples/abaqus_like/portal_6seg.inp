@@ -1,0 +1,77 @@
+*Part, name=PORTAL
+*Node
+1, 0.0, 0.0
+2, 0.0, 0.5
+3, 0.0, 1.0
+4, 0.0, 1.5
+5, 0.0, 2.0
+6, 0.0, 2.5
+7, 0.0, 3.0
+8, 5.0, 0.0
+9, 5.0, 0.5
+10, 5.0, 1.0
+11, 5.0, 1.5
+12, 5.0, 2.0
+13, 5.0, 2.5
+14, 5.0, 3.0
+15, 0.833333, 3.0
+16, 1.666667, 3.0
+17, 2.5, 3.0
+18, 3.333333, 3.0
+19, 4.166667, 3.0
+*Element, type=B21, elset=COL
+1, 1, 2
+2, 2, 3
+3, 3, 4
+4, 4, 5
+5, 5, 6
+6, 6, 7
+7, 8, 9
+8, 9, 10
+9, 10, 11
+10, 11, 12
+11, 12, 13
+12, 13, 14
+*Element, type=B21, elset=BEAM
+13, 7, 15
+14, 15, 16
+15, 16, 17
+16, 17, 18
+17, 18, 19
+18, 19, 14
+*Nset, nset=BASE
+1, 8
+*Beam Section, elset=COL, material=CONC, section=RECT
+0.30, 0.40
+*Beam Section, elset=BEAM, material=CONC, section=RECT
+0.30, 0.50
+*Material, name=CONC
+*Elastic
+3.0e10, 0.2
+*Density
+2500.
+*Assembly
+*Instance, name=PORTAL-1, part=PORTAL
+0.0, 0.0
+*End Instance
+*End Assembly
+*Step, name=Gravity, nlgeom=NO
+*Static
+*Dload
+COL, GRAV, 9.81, 0.0, -1.0, 0.0
+BEAM, GRAV, 9.81, 0.0, -1.0, 0.0
+*Boundary
+BASE, 1, 3
+*End Step
+*Step, name=Dynamic, nlgeom=YES
+*Dynamic
+0.002, 2.0
+*Amplitude, name=AMP1, input=TABULAR
+0.0, 0.0
+0.5, 1.0
+1.0, 0.0
+1.5, -1.0
+2.0, 0.0
+*Boundary, type=ACCELERATION, amplitude=AMP1
+BASE, 1, 1, 1.0
+*End Step

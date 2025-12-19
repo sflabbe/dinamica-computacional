@@ -1,7 +1,8 @@
 import numpy as np
 from numpy.testing import assert_allclose
 
-from dinamica_computacional.integrators.hht_alpha import hht_alpha_newton
+from dc_solver.integrators.hht_alpha import hht_alpha_newton
+from dc_solver.integrators.newmark import newmark_beta_newton
 
 from tests.fixtures import assemble_full, build_sdof_column_model
 
@@ -34,6 +35,8 @@ def test_hht_alpha_matches_sdof_cosine_response():
         t,
         ag=np.zeros_like(t),
         drift_height=max(nd.y for nd in model.nodes),
+        base_nodes=(0, 0),
+        drift_nodes=(1, 1),
         alpha=0.0,
         u0=u0,
         v0=np.zeros(model.ndof()),
@@ -60,6 +63,8 @@ def test_hht_alpha_numerical_damping_decreases_energy():
         t,
         ag=np.zeros_like(t),
         drift_height=max(nd.y for nd in model.nodes),
+        base_nodes=(0, 0),
+        drift_nodes=(1, 1),
         alpha=-0.05,
         u0=u0,
         v0=np.zeros(model.ndof()),
@@ -82,6 +87,8 @@ def test_base_accel_equivalent_to_applied_load_history():
         t,
         ag=ag,
         drift_height=max(nd.y for nd in model.nodes),
+        base_nodes=(0, 0),
+        drift_nodes=(1, 1),
         alpha=0.0,
     )
 
@@ -94,8 +101,72 @@ def test_base_accel_equivalent_to_applied_load_history():
         t,
         ag=np.zeros_like(t),
         drift_height=max(nd.y for nd in model.nodes),
+        base_nodes=(0, 0),
+        drift_nodes=(1, 1),
         alpha=0.0,
         load_hist=load_hist,
     )
 
     assert_allclose(out_ag["u"], out_load["u"], rtol=1e-6, atol=1e-8)
+
+
+def test_newmark_matches_sdof_cosine_response():
+    omega = 2.0 * np.pi
+    model, dof, k, m = _setup_sdof(omega=omega)
+
+    dt = 0.002
+    t = np.arange(0.0, 2.0 + 1e-12, dt)
+    amp = 1e-3
+    u0 = np.zeros(model.ndof())
+    u0[dof] = amp
+
+    out = newmark_beta_newton(
+        model,
+        t,
+        ag=np.zeros_like(t),
+        drift_height=max(nd.y for nd in model.nodes),
+        base_nodes=(0, 0),
+        drift_nodes=(1, 1),
+        u0=u0,
+        v0=np.zeros(model.ndof()),
+    )
+
+    disp = out["u"][:, dof]
+    expected = amp * np.cos(omega * t)
+    rms = np.sqrt(np.mean((disp - expected) ** 2))
+    assert rms < 1e-2
+
+
+def test_newmark_dt_sensitivity_decreases():
+    omega = 2.0 * np.pi
+    model, dof, _, _ = _setup_sdof(omega=omega)
+
+    t_end = 1.0
+    amp = 5e-4
+    u0 = np.zeros(model.ndof())
+    u0[dof] = amp
+
+    def solve(dt: float) -> np.ndarray:
+        t = np.arange(0.0, t_end + 1e-12, dt)
+        out = newmark_beta_newton(
+            model,
+            t,
+            ag=np.zeros_like(t),
+            drift_height=max(nd.y for nd in model.nodes),
+            base_nodes=(0, 0),
+            drift_nodes=(1, 1),
+            u0=u0,
+            v0=np.zeros(model.ndof()),
+        )
+        return out["u"][:, dof]
+
+    u_dt = solve(0.01)
+    u_dt2 = solve(0.005)
+    u_dt4 = solve(0.0025)
+
+    u_dt_ref = u_dt4[::4]
+    u_dt2_ref = u_dt4[::2]
+    err_dt = np.linalg.norm(u_dt - u_dt_ref)
+    err_dt2 = np.linalg.norm(u_dt2 - u_dt2_ref)
+
+    assert err_dt2 < err_dt
