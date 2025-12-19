@@ -1,7 +1,7 @@
 import numpy as np
 from numpy.testing import assert_allclose
 
-from dinamica_computacional.integrators.static_newton import solve_static_newton
+from dc_solver.static.newton import solve_static_newton
 
 from tests.fixtures import assemble_full, build_cantilever_model, build_portal_frame_model
 
@@ -16,7 +16,7 @@ def test_linear_cantilever_tip_load():
     tip_ux = model.nodes[1].dof_u[0]
     model.load_const[tip_ux] = P
 
-    u = solve_static_newton(model)
+    u = solve_static_newton(model, model.load_const)
     delta = P * L**3 / (3.0 * E * I)
 
     assert_allclose(u[tip_ux], delta, rtol=1e-3)
@@ -36,7 +36,7 @@ def test_portal_gravity_reactions_balance():
     model.load_const[uy2] = -50_000.0
     model.load_const[uy3] = -50_000.0
 
-    u = solve_static_newton(model)
+    u = solve_static_newton(model, model.load_const)
 
     max_uy = np.max(np.abs(u[[uy2, uy3]]))
     assert max_uy > 0.0
@@ -49,4 +49,5 @@ def test_portal_gravity_reactions_balance():
     sum_reaction_fy = np.sum(reactions[fixed_fy])
     sum_loads_fy = np.sum(model.load_const[[uy2, uy3]])
     assert_allclose(sum_reaction_fy + sum_loads_fy, 0.0, atol=1e-6)
+    assert_allclose(reactions[fixed_fy][0], reactions[fixed_fy][1], rtol=1e-6)
     assert_allclose(K_full, K_full.T)

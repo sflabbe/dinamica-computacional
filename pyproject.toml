@@ -6,6 +6,11 @@ dependencies = ["numpy", "matplotlib"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+test = ["pytest"]
 
-[tool.setuptools]
-packages = ["plastic_hinge"]
+[project.scripts]
+dc-solver-tests = "pytest:main"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["dc_solver*", "problems*", "plastic_hinge*"]

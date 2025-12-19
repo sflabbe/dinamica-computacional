@@ -1,9 +1,9 @@
 import numpy as np
 from numpy.testing import assert_allclose, assert_equal
 
-from dinamica_computacional.core.dof import DofManager, Node
-from dinamica_computacional.core.model import Model, ModelOptions
-from dinamica_computacional.elements.beam2d import Beam2D
+from dc_solver.fem.frame2d import FrameElementLinear2D
+from dc_solver.fem.model import Model
+from dc_solver.fem.nodes import DofManager, Node
 
 from tests.fixtures import assemble_full
 
@@ -14,18 +14,19 @@ def test_dof_mapping_and_boundary_conditions():
         Node(0.0, 0.0, dm.new_trans(), dm.new_rot()),
         Node(2.0, 0.0, dm.new_trans(), dm.new_rot()),
     ]
-    element = Beam2D(0, 1, E=210e9, A=0.01, I=1e-4, nodes=nodes)
+    element = FrameElementLinear2D(0, 1, E=210e9, A=0.01, I=1e-4, nodes=nodes)
     fixed = np.array([*nodes[0].dof_u, nodes[0].dof_th], dtype=int)
     ndof = dm.ndof
     model = Model(
         nodes=nodes,
-        elements=[element],
+        beams=[element],
         hinges=[],
         fixed_dofs=fixed,
         mass_diag=np.ones(ndof),
         C_diag=np.zeros(ndof),
         load_const=np.zeros(ndof),
-        options=ModelOptions(),
+        col_hinge_groups=[],
+        nlgeom=False,
     )
 
     assert_equal(model.ndof(), 6)
