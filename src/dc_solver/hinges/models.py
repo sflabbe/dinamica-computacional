@@ -8,7 +8,7 @@ from typing import Dict, Optional, Tuple, List
 
 import numpy as np
 
-from plastic_hinge import NMSurfacePolygon
+from plastic_hinge import NMSurfacePolygon, PlasticHingeNM
 from dc_solver.fem.nodes import Node
 
 
@@ -80,34 +80,64 @@ class ColumnHingeNMRot:
 
 @dataclass
 class SHMBeamHinge1D:
+    """Simplified Smooth Hysteretic Model (SHM) hinge with degradation and pinching."""
+
     K0_0: float
     My_0: float
     alpha_post: float = 0.02
     cK: float = 2.0
     cMy: float = 1.0
+    bw_A: float = 1.0
+    bw_beta: float = 0.6
+    bw_gamma: float = 0.4
+    bw_n: float = 2.0
+    pinch: float = 0.3
+    theta_pinch: float = 0.002
 
-    th_p_comm: float = 0.0
+    th_comm: float = 0.0
+    z_comm: float = 0.0
     a_comm: float = 0.0
     M_comm: float = 0.0
 
-    def eval_increment(self, dth: float) -> Tuple[float, float, float, float, float]:
-        K0 = self.K0_0 * math.exp(-self.cK * self.a_comm)
-        My = self.My_0 * math.exp(-self.cMy * self.a_comm)
-        Kp = self.alpha_post * K0
-        H = (K0 * Kp) / max(K0 - Kp, 1e-18)
+    def _bw_rhs(self, z: float, sign_dth: float) -> float:
+        return self.bw_A - self.bw_beta * sign_dth * abs(z) ** (self.bw_n - 1.0) * z - self.bw_gamma * abs(z) ** self.bw_n
 
-        M_trial = self.M_comm + K0 * dth
-        f = abs(M_trial) - (My + H * self.a_comm)
-        if f <= 0.0:
-            return M_trial, K0, self.th_p_comm, self.a_comm, M_trial
+    def eval_increment(self, dth: float, nsub: int | None = None) -> Tuple[float, float, float, float, float]:
+        if nsub is None:
+            nsub = max(1, int(np.ceil(abs(dth) / 2e-4)))
+        dth_sub = dth / nsub
+        th = self.th_comm
+        z = self.z_comm
+        a = self.a_comm
+        M = self.M_comm
 
-        dg = f / (K0 + H)
-        sgn = 1.0 if M_trial >= 0 else -1.0
-        th_p_new = self.th_p_comm + dg * sgn
-        a_new = self.a_comm + dg
-        M_new = M_trial - K0 * dg * sgn
-        k_tan = (K0 * H) / (K0 + H)
-        return M_new, k_tan, th_p_new, a_new, M_new
+        for _ in range(nsub):
+            th_new = th + dth_sub
+            sign_dth = 1.0 if dth_sub >= 0.0 else -1.0
+
+            def rhs(z_local: float) -> float:
+                return self._bw_rhs(z_local, sign_dth)
+
+            k1 = rhs(z)
+            k2 = rhs(z + 0.5 * dth_sub * k1)
+            k3 = rhs(z + 0.5 * dth_sub * k2)
+            k4 = rhs(z + dth_sub * k3)
+            z_new = z + (dth_sub / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+            K0 = self.K0_0 * math.exp(-self.cK * a)
+            My = self.My_0 * math.exp(-self.cMy * a)
+            pinch_factor = 1.0 - self.pinch * math.exp(-abs(th_new) / max(self.theta_pinch, 1e-12))
+            M_new = self.alpha_post * K0 * th_new + (1.0 - self.alpha_post) * My * z_new * pinch_factor
+
+            a += max(0.0, 0.5 * (M + M_new) * dth_sub)
+            th = th_new
+            z = max(-1.2, min(1.2, z_new))
+            M = M_new
+
+        K0 = self.K0_0 * math.exp(-self.cK * a)
+        My = self.My_0 * math.exp(-self.cMy * a)
+        k_tan = self.alpha_post * K0 + (1.0 - self.alpha_post) * My * (1.0 - self.pinch)
+        return M, k_tan, th, a, M
 
 
 @dataclass
@@ -150,15 +180,17 @@ class RotSpringElement:
             M, kM, th_p_new, a_new, M_new = self.col_hinge.eval_increment(dth_inc)
             dW_pl = max(0.0, 0.5 * (M_old + M) * (th_p_new - th_p_old))
             info_extra = {"My": float(My_old), "a": float(a_old), "dW_pl": float(dW_pl)}
+            th_next = th_p_new
         elif self.kind == "beam_shm":
             assert self.beam_hinge is not None
             a_old = float(self.beam_hinge.a_comm)
-            th_p_old = float(self.beam_hinge.th_p_comm)
+            th_old = float(self.beam_hinge.th_comm)
             M_old = float(self.beam_hinge.M_comm)
 
-            M, kM, th_p_new, a_new, M_new = self.beam_hinge.eval_increment(dth_inc)
-            dW_pl = max(0.0, 0.5 * (M_old + M) * (th_p_new - th_p_old))
+            M, kM, th_new, a_new, M_new = self.beam_hinge.eval_increment(dth_inc)
+            dW_pl = max(0.0, 0.5 * (M_old + M) * (th_new - th_old))
             info_extra = {"a": float(a_old), "dW_pl": float(dW_pl)}
+            th_next = th_new
         else:
             raise ValueError("Unknown hinge kind")
 
@@ -167,7 +199,7 @@ class RotSpringElement:
         f_l = (Bm.T * M).reshape(6)
 
         self._trial = {
-            "th_p_new": th_p_new,
+            "th_p_new": th_next,
             "a_new": a_new,
             "M_new": M_new,
         }
@@ -185,6 +217,115 @@ class RotSpringElement:
             self.col_hinge.M_comm = self._trial["M_new"]
         elif self.kind == "beam_shm":
             assert self.beam_hinge is not None
-            self.beam_hinge.th_p_comm = self._trial["th_p_new"]
+            self.beam_hinge.th_comm = self._trial["th_p_new"]
             self.beam_hinge.a_comm = self._trial["a_new"]
             self.beam_hinge.M_comm = self._trial["M_new"]
+
+    def reset_state(self) -> None:
+        self._trial = None
+        if self.kind == "col_nm":
+            assert self.col_hinge is not None
+            self.col_hinge.th_p_comm = 0.0
+            self.col_hinge.a_comm = 0.0
+            self.col_hinge.M_comm = 0.0
+        elif self.kind == "beam_shm":
+            assert self.beam_hinge is not None
+            self.beam_hinge.th_comm = 0.0
+            self.beam_hinge.a_comm = 0.0
+            self.beam_hinge.M_comm = 0.0
+
+
+@dataclass
+class ColumnHingeNM2D:
+    """Wrapper for N-M hinge with associative flow and consistent tangent."""
+
+    hinge: PlasticHingeNM
+
+
+@dataclass
+class HingeNM2DElement:
+    """Zero-length N-M hinge between node i and j (axial + rotation)."""
+
+    ni: int
+    nj: int
+    hinge: ColumnHingeNM2D
+    nodes: List[Node]
+
+    _trial: Dict | None = None
+
+    def dofs(self) -> np.ndarray:
+        ni = self.nodes[self.ni]
+        nj = self.nodes[self.nj]
+        return np.array(
+            [
+                ni.dof_u[0],
+                ni.dof_u[1],
+                ni.dof_th,
+                nj.dof_u[0],
+                nj.dof_u[1],
+                nj.dof_th,
+            ],
+            dtype=int,
+        )
+
+    def _axis(self) -> Tuple[float, float]:
+        ni = self.nodes[self.ni]
+        nj = self.nodes[self.nj]
+        dx = float(nj.x - ni.x)
+        dy = float(nj.y - ni.y)
+        L = math.hypot(dx, dy)
+        if L <= 1e-12:
+            return 1.0, 0.0
+        return dx / L, dy / L
+
+    def eval_trial(self, u_trial: np.ndarray, u_comm: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict]:
+        dofs = self.dofs()
+        cx, cy = self._axis()
+
+        u_i = u_trial[dofs[0]]
+        v_i = u_trial[dofs[1]]
+        th_i = u_trial[dofs[2]]
+        u_j = u_trial[dofs[3]]
+        v_j = u_trial[dofs[4]]
+        th_j = u_trial[dofs[5]]
+
+        u_i_c = u_comm[dofs[0]]
+        v_i_c = u_comm[dofs[1]]
+        th_i_c = u_comm[dofs[2]]
+        u_j_c = u_comm[dofs[3]]
+        v_j_c = u_comm[dofs[4]]
+        th_j_c = u_comm[dofs[5]]
+
+        q_trial = np.array([cx * (u_j - u_i) + cy * (v_j - v_i), th_j - th_i], dtype=float)
+        q_comm = np.array([cx * (u_j_c - u_i_c) + cy * (v_j_c - v_i_c), th_j_c - th_i_c], dtype=float)
+        dq = q_trial - q_comm
+
+        info = self.hinge.hinge.update(dq, commit=False)
+        s_vec = info["s"]
+        Kt = info["Kt"]
+
+        B = np.array(
+            [
+                [-cx, -cy, 0.0, cx, cy, 0.0],
+                [0.0, 0.0, -1.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        )
+        k_l = B.T @ Kt @ B
+        f_l = B.T @ s_vec
+
+        self._trial = {"s_new": s_vec.copy(), "q_p_new": info["q_p"].copy()}
+        out = {"dq": dq.copy(), "N": float(s_vec[0]), "M": float(s_vec[1]), "active": info["active"]}
+        return k_l, f_l, out
+
+    def commit(self) -> None:
+        if self._trial is None:
+            return
+        self.hinge.hinge.s = self._trial["s_new"].copy()
+        self.hinge.hinge.q_p = self._trial["q_p_new"].copy()
+        self._trial = None
+
+    def reset_state(self) -> None:
+        self._trial = None
+        self.hinge.hinge.s = np.zeros(2, float)
+        self.hinge.hinge.q_p = np.zeros(2, float)
