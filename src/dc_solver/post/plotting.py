@@ -546,3 +546,160 @@ def plot_structure_states(
 
     fig.savefig(outfile, dpi=170)
     plt.close(fig)
+
+
+def hinge_response_history(
+    model: Model,
+    last: Dict[str, np.ndarray],
+) -> Dict[str, np.ndarray]:
+    hinge_hist = last.get("hinges", [])
+    if not hinge_hist:
+        return {"rotations": np.array([]), "moments": np.array([]), "axial": np.array([]), "t": np.array([])}
+
+    u_hist = last.get("u", np.array([], dtype=float))
+    t = last.get("t", np.array([], dtype=float))
+    n_steps = len(hinge_hist)
+    n_hinges = len(model.hinges)
+
+    rotations = np.zeros((n_steps, n_hinges))
+    moments = np.zeros((n_steps, n_hinges))
+    axial = np.full((n_steps, n_hinges), np.nan)
+
+    u_snap = u_hist[1:n_steps + 1] if isinstance(u_hist, np.ndarray) and u_hist.shape[0] >= n_steps + 1 else None
+
+    for hidx, h in enumerate(model.hinges):
+        dofs = h.dofs()
+        th_i = dofs[2]
+        th_j = dofs[5]
+        if u_snap is not None:
+            rotations[:, hidx] = u_snap[:, th_j] - u_snap[:, th_i]
+
+    for step_idx, step_info in enumerate(hinge_hist):
+        for hidx, info in enumerate(step_info):
+            moments[step_idx, hidx] = float(info.get("M", np.nan))
+            if "N" in info:
+                axial[step_idx, hidx] = float(info.get("N"))
+
+    t_use = t[1:n_steps + 1] if t.size >= n_steps + 1 else np.arange(n_steps, dtype=float)
+    return {"rotations": rotations, "moments": moments, "axial": axial, "t": t_use}
+
+
+def plot_hinge_hysteresis(
+    model: Model,
+    last: Dict[str, np.ndarray],
+    outfile: str,
+    *,
+    title: str = "Hinge M-θ hysteresis",
+) -> None:
+    hist = hinge_response_history(model, last)
+    rotations = hist["rotations"]
+    moments = hist["moments"]
+    t = hist["t"]
+    if rotations.size == 0 or moments.size == 0:
+        return
+
+    n_hinges = rotations.shape[1]
+    ncols = 2
+    nrows = math.ceil(n_hinges / ncols)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 4.5 * nrows), constrained_layout=True)
+    axs = np.atleast_1d(axs).ravel()
+
+    for hidx in range(n_hinges):
+        ax = axs[hidx]
+        plot_hysteresis_time_gradient(rotations[:, hidx], moments[:, hidx], t=t, ax=ax, add_colorbar=True)
+        ax.set_title(f"H{hidx} M-θ")
+        ax.set_xlabel("θ [rad]")
+        ax.set_ylabel("M [N·m]")
+        ax.grid(True, alpha=0.3)
+
+    for ax in axs[n_hinges:]:
+        ax.axis("off")
+
+    fig.suptitle(title)
+    fig.savefig(outfile, dpi=170)
+    plt.close(fig)
+
+
+def plot_hinge_nm_interaction(
+    model: Model,
+    last: Dict[str, np.ndarray],
+    outfile: str,
+    *,
+    title: str = "Hinge N-M interaction",
+) -> None:
+    hist = hinge_response_history(model, last)
+    axial = hist["axial"]
+    moments = hist["moments"]
+    t = hist["t"]
+    if axial.size == 0 or moments.size == 0:
+        return
+
+    nm_indices = [idx for idx in range(axial.shape[1]) if not np.all(np.isnan(axial[:, idx]))]
+    if not nm_indices:
+        return
+
+    ncols = 2
+    nrows = math.ceil(len(nm_indices) / ncols)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 4.5 * nrows), constrained_layout=True)
+    axs = np.atleast_1d(axs).ravel()
+
+    for plot_idx, hidx in enumerate(nm_indices):
+        ax = axs[plot_idx]
+        plot_hysteresis_time_gradient(axial[:, hidx], moments[:, hidx], t=t, ax=ax, add_colorbar=True)
+        ax.set_title(f"H{hidx} N-M")
+        ax.set_xlabel("N [N]")
+        ax.set_ylabel("M [N·m]")
+        ax.grid(True, alpha=0.3)
+
+    for ax in axs[len(nm_indices):]:
+        ax.axis("off")
+
+    fig.suptitle(title)
+    fig.savefig(outfile, dpi=170)
+    plt.close(fig)
+
+
+def plot_model_assembly(
+    model: Model,
+    outfile: str,
+    *,
+    title: str = "Model assembly with boundary conditions",
+) -> None:
+    xy = _node_xy(model, None)
+    fig, ax = plt.subplots(figsize=(6.5, 5.5), constrained_layout=True)
+
+    for eb in model.beams:
+        i, j = eb.ni, eb.nj
+        ax.plot([xy[i, 0], xy[j, 0]], [xy[i, 1], xy[j, 1]], color="0.5", linewidth=1.6)
+
+    fixed = set(int(d) for d in model.fixed_dofs)
+    for idx, nd in enumerate(model.nodes):
+        dof_labels = []
+        if nd.dof_u[0] in fixed:
+            dof_labels.append("ux")
+        if nd.dof_u[1] in fixed:
+            dof_labels.append("uy")
+        if nd.dof_th in fixed:
+            dof_labels.append("θ")
+        if dof_labels:
+            ax.scatter([xy[idx, 0]], [xy[idx, 1]], s=70, marker="s", color="tab:red", zorder=3)
+            ax.text(
+                xy[idx, 0],
+                xy[idx, 1],
+                f"FIX({','.join(dof_labels)})",
+                fontsize=8,
+                ha="left",
+                va="bottom",
+                color="tab:red",
+            )
+        else:
+            ax.scatter([xy[idx, 0]], [xy[idx, 1]], s=40, marker="o", color="0.2", zorder=3)
+        ax.text(xy[idx, 0], xy[idx, 1], f"N{idx}", fontsize=8, color="0.25")
+
+    ax.set_title(title)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    fig.savefig(outfile, dpi=170)
+    plt.close(fig)

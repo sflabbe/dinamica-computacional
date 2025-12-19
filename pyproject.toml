@@ -10,6 +10,7 @@ test = ["pytest"]
 
 [project.scripts]
 dc-solver-tests = "pytest:main"
+dinamica-computacional = "dc_solver.cli_app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

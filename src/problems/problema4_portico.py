@@ -27,7 +27,11 @@ from dc_solver.hinges.models import (
     moment_capacity_from_polygon,
 )
 from dc_solver.integrators.hht_alpha import hht_alpha_newton
-from dc_solver.post.plotting import plot_structure_states
+from dc_solver.post.plotting import (
+    plot_structure_states,
+    plot_hinge_hysteresis,
+    plot_hinge_nm_interaction,
+)
 
 
 def mirror_section_about_middepth(sec: RCSectionRect) -> RCSectionRect:
@@ -265,6 +269,7 @@ def run_incremental_amplitudes(
     nseg: int = 6,
     cover: float = 0.05,
     nlgeom: bool = False,
+    verbose: bool = False,
 ):
     g = 9.81
     model, meta = build_portal_beam_hinge(
@@ -281,6 +286,7 @@ def run_incremental_amplitudes(
     peak_drifts = []
     dt_hist = []
     last = None
+    runs: List[Dict[str, np.ndarray]] = []
 
     for A_g in amps_g:
         A = float(A_g) * g
@@ -301,18 +307,23 @@ def run_incremental_amplitudes(
                     drift_nodes=(2, 3),
                     max_iter=50,
                     tol=1e-6,
-                    verbose=False,
+                    verbose=verbose,
                 )
                 out["A_ms2"] = float(A)
                 out["A_input_g"] = float(A_g)
                 out["zeta"] = float(zeta)
                 out["T0"] = float(T0)
                 last = out
+                runs.append(out)
                 dt_hist.append(float(out["dt"]))
                 break
             except RuntimeError:
                 if dt <= dt_min + 1e-15:
-                    meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
+                    meta.update({
+                        "dt_hist": dt_hist,
+                        "amps_g_used": amps_g[:len(peak_drifts)],
+                        "runs": runs,
+                    })
                     return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
                 dt *= 0.5
 
@@ -321,7 +332,11 @@ def run_incremental_amplitudes(
         if pk >= drift_limit:
             break
 
-    meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
+    meta.update({
+        "dt_hist": dt_hist,
+        "amps_g_used": amps_g[:len(peak_drifts)],
+        "runs": runs,
+    })
     return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
 
 
@@ -364,6 +379,56 @@ def plot_results(
     )
 
 
+def _amp_tag(value: float) -> str:
+    return f"{value:.2f}g".replace(".", "p")
+
+
+def plot_results_all_phases(
+    model: Model,
+    meta: Dict,
+    drift_limit: float = 0.10,
+    snapshot_limit: Optional[float] = None,
+) -> None:
+    runs = meta.get("runs", [])
+    if not runs:
+        return
+    out = _outputs_dir()
+    H = float(meta.get("H", 1.0))
+    for run in runs:
+        ag = float(run.get("A_input_g", float("nan")))
+        tag = _amp_tag(ag)
+        plot_structure_states(
+            model,
+            run,
+            drift_height=H,
+            snapshot_limit=snapshot_limit,
+            outfile=str(out / f"problem4_{tag}_states_U.png"),
+            field="U",
+            shared_colorbar=True,
+        )
+        plot_structure_states(
+            model,
+            run,
+            drift_height=H,
+            snapshot_limit=snapshot_limit,
+            outfile=str(out / f"problem4_{tag}_states_S.png"),
+            field="S",
+            shared_colorbar=True,
+        )
+        plot_hinge_hysteresis(
+            model,
+            run,
+            outfile=str(out / f"problem4_{tag}_hinge_hysteresis.png"),
+            title=f"Hinge M-θ hysteresis (A_g={ag:.2f}g)",
+        )
+        plot_hinge_nm_interaction(
+            model,
+            run,
+            outfile=str(out / f"problem4_{tag}_hinge_nm.png"),
+            title=f"Hinge N-M interaction (A_g={ag:.2f}g)",
+        )
+
+
 def main():
     drift_limit = 0.10
     snapshot_limit = 0.04
@@ -385,6 +450,7 @@ def main():
         nseg=nseg,
         nlgeom=nlgeom,
     )
+    plot_results_all_phases(model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit)
     plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit)
 
     out = _outputs_dir()
