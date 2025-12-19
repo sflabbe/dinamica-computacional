@@ -12,5 +12,5 @@ test = ["pytest"]
 dc-solver-tests = "pytest:main"
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
+where = ["src"]
 include = ["dc_solver*", "problems*", "plastic_hinge*"]

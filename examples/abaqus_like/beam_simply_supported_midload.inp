@@ -1,0 +1,32 @@
+*Part, name=SIMPLY_SUPPORTED
+*Node
+1, 0.0, 0.0
+2, 1.0, 0.0
+3, 2.0, 0.0
+*Element, type=B21, elset=BEAM
+1, 1, 2
+2, 2, 3
+*Nset, nset=PIN
+1
+*Nset, nset=ROLL
+3
+*Nset, nset=MID
+2
+*Beam Section, elset=BEAM, material=STEEL, section=RECT
+0.20, 0.33
+*Material, name=STEEL
+*Elastic
+2.10e11, 0.3
+*Assembly
+*Instance, name=SIMPLY_SUPPORTED-1, part=SIMPLY_SUPPORTED
+0.0, 0.0
+*End Instance
+*End Assembly
+*Step, name=Static, nlgeom=NO
+*Static
+*Boundary
+PIN, 1, 2
+ROLL, 2, 2
+*Cload
+MID, 2, -10000.0
+*End Step
