@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from plastic_hinge import RCSectionRect, RebarLayer, NMSurfacePolygon
 
@@ -13,7 +19,12 @@ from dc_solver.fem.nodes import Node, DofManager
 from dc_solver.fem.frame2d import FrameElementLinear2D
 from dc_solver.fem.model import Model
 from dc_solver.fem.utils import discretize_member
-from dc_solver.hinges.models import ColumnHingeNMRot, SHMBeamHinge1D, RotSpringElement
+from dc_solver.hinges.models import (
+    ColumnHingeNMRot,
+    SHMBeamHinge1D,
+    RotSpringElement,
+    moment_capacity_from_polygon,
+)
 from dc_solver.integrators.hht_alpha import hht_alpha_newton
 from dc_solver.post.plotting import plot_structure_states
 
@@ -38,6 +49,17 @@ def build_nm_surface(sec: RCSectionRect, npts: int = 90, tension_positive: bool 
     return NMSurfacePolygon.from_points(pts)
 
 
+def _outputs_dir() -> Path:
+    root = Path(__file__).resolve().parents[2]
+    out = root / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _rebar_area(phi_m: float) -> float:
+    return math.pi * (phi_m / 2.0) ** 2
+
+
 def build_portal_beam_hinge(
     H: float = 3.0,
     L: float = 5.0,
@@ -45,6 +67,7 @@ def build_portal_beam_hinge(
     zeta: float = 0.02,
     P_gravity_total: float = 1500e3,
     nseg: int = 6,
+    cover: float = 0.05,
     nlgeom: bool = False,
 ) -> Tuple[Model, Dict]:
     dm = DofManager()
@@ -73,15 +96,23 @@ def build_portal_beam_hinge(
     fy = 420e6
     Es = 200e9
 
-    b_col, h_col = 0.30, 0.40
+    b_col, h_col = 0.40, 0.60
+    phi20 = 20e-3
     layers_col = [
-        RebarLayer(As=4 * (math.pi * (16e-3 / 2) ** 2), y=0.05),
-        RebarLayer(As=4 * (math.pi * (16e-3 / 2) ** 2), y=h_col - 0.05),
+        RebarLayer(As=4 * _rebar_area(phi20), y=cover),
+        RebarLayer(As=4 * _rebar_area(phi20), y=h_col - cover),
     ]
-    sec_col = RCSectionRect(b=b_col, h=h_col, fc=fc, fy=fy, Es=Es, layers=layers_col, n_fibers=60)
-    surf_col = build_nm_surface(sec_col, npts=60, tension_positive=True)
+    sec_col = RCSectionRect(b=b_col, h=h_col, fc=fc, fy=fy, Es=Es, layers=layers_col, n_fibers=80)
+    surf_col = build_nm_surface(sec_col, npts=80, tension_positive=True)
 
-    b_beam, h_beam = 0.30, 0.50
+    b_beam, h_beam = 0.25, 0.50
+    layers_beam = [
+        RebarLayer(As=3 * _rebar_area(phi20), y=cover),
+        RebarLayer(As=2 * _rebar_area(phi20), y=h_beam - cover),
+    ]
+    sec_beam = RCSectionRect(b=b_beam, h=h_beam, fc=fc, fy=fy, Es=Es, layers=layers_beam, n_fibers=80)
+    surf_beam = build_nm_surface(sec_beam, npts=80, tension_positive=True)
+    My_beam = moment_capacity_from_polygon(surf_beam, N=0.0)
     A_beam = b_beam * h_beam
     I_beam = b_beam * (h_beam ** 3) / 12.0
 
@@ -116,8 +147,8 @@ def build_portal_beam_hinge(
     hinges.append(RotSpringElement(2, i2L, "col_nm", ColumnHingeNMRot(surface=surf_col, k0=k_col0), None, nodes))
     hinges.append(RotSpringElement(1, i1R, "col_nm", ColumnHingeNMRot(surface=surf_col, k0=k_col0), None, nodes))
     hinges.append(RotSpringElement(3, i3R, "col_nm", ColumnHingeNMRot(surface=surf_col, k0=k_col0), None, nodes))
-    shm_left = SHMBeamHinge1D(K0_0=k_beam0, My_0=400e3)
-    shm_right = SHMBeamHinge1D(K0_0=k_beam0, My_0=400e3)
+    shm_left = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
+    shm_right = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
     hinges.append(RotSpringElement(2, i2B, "beam_shm", None, shm_left, nodes))
     hinges.append(RotSpringElement(3, i3B, "beam_shm", None, shm_right, nodes))
 
@@ -170,6 +201,9 @@ def build_portal_beam_hinge(
         "omega0": omega0,
         "section_col": sec_col,
         "surface_col": surf_col,
+        "section_beam": sec_beam,
+        "surface_beam": surf_beam,
+        "My_beam": My_beam,
         "H": H,
         "L": L,
         "nseg": nseg_use,
@@ -223,6 +257,7 @@ def run_incremental_amplitudes(
     dt_min=0.00025,
     alpha=-0.05,
     nseg: int = 6,
+    cover: float = 0.05,
     nlgeom: bool = False,
 ):
     g = 9.81
@@ -233,10 +268,12 @@ def run_incremental_amplitudes(
         zeta=zeta,
         P_gravity_total=1500e3,
         nseg=nseg,
+        cover=cover,
         nlgeom=nlgeom,
     )
 
     peak_drifts = []
+    dt_hist = []
     last = None
 
     for A_g in amps_g:
@@ -265,9 +302,11 @@ def run_incremental_amplitudes(
                 out["zeta"] = float(zeta)
                 out["T0"] = float(T0)
                 last = out
+                dt_hist.append(float(out["dt"]))
                 break
             except RuntimeError:
                 if dt <= dt_min + 1e-15:
+                    meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
                     return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
                 dt *= 0.5
 
@@ -276,6 +315,7 @@ def run_incremental_amplitudes(
         if pk >= drift_limit:
             break
 
+    meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
     return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
 
 
@@ -288,13 +328,14 @@ def plot_results(
 ) -> None:
     if last is None:
         return
+    out = _outputs_dir()
     H = float(meta.get("H", 1.0))
     plot_structure_states(
         model,
         last,
         drift_height=H,
         snapshot_limit=snapshot_limit,
-        outfile="problem4_states_U.png",
+        outfile=str(out / "problem4_states_U.png"),
         field="U",
         shared_colorbar=True,
     )
@@ -303,7 +344,7 @@ def plot_results(
         last,
         drift_height=H,
         snapshot_limit=snapshot_limit,
-        outfile="problem4_states_S.png",
+        outfile=str(out / "problem4_states_S.png"),
         field="S",
         shared_colorbar=True,
     )
@@ -312,7 +353,7 @@ def plot_results(
         last,
         drift_height=H,
         snapshot_limit=snapshot_limit,
-        outfile="problem4_states_members.png",
+        outfile=str(out / "problem4_states_members.png"),
         field="both",
     )
 
@@ -324,7 +365,7 @@ def main():
     nseg = 6
     nlgeom = False
 
-    _, _, last, model, meta = run_incremental_amplitudes(
+    peak_drifts, amps_used, last, model, meta = run_incremental_amplitudes(
         H=3.0,
         L=5.0,
         T0=0.5,
@@ -338,11 +379,44 @@ def main():
         nseg=nseg,
         nlgeom=nlgeom,
     )
-
-    model, meta = build_portal_beam_hinge(
-        H=3.0, L=5.0, T0=0.5, zeta=0.02, P_gravity_total=1500e3, nseg=nseg, nlgeom=nlgeom
-    )
     plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit)
+
+    out = _outputs_dir()
+    if last is not None:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(last["t"], last["drift"], label="drift")
+        ax.axhline(drift_limit, color="r", linestyle="--", label="limit")
+        ax.set_xlabel("t [s]")
+        ax.set_ylabel("Drift")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(out / "problem4_drift_time.png", dpi=160)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(last["drift"], last["Vb"])
+        ax.set_xlabel("Drift")
+        ax.set_ylabel("Base shear [N]")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out / "problem4_vb_drift.png", dpi=160)
+        plt.close(fig)
+
+    lines = [
+        "Problem 4 summary",
+        f"drift_limit={drift_limit:.3f}",
+        f"snapshot_limit={snapshot_limit:.3f}",
+        f"alpha={alpha:.3f}",
+        "A_g,peak_drift,dt",
+    ]
+    dt_hist = meta.get("dt_hist", [])
+    for i, (amp, drift) in enumerate(zip(amps_used, peak_drifts)):
+        dt_val = dt_hist[i] if i < len(dt_hist) else float("nan")
+        lines.append(f"{amp:.3f},{drift:.6f},{dt_val:.6f}")
+    if amps_used.size:
+        lines.append(f"collapse_A_g={amps_used[-1]:.3f}")
+    (out / "problem4_summary.txt").write_text("\n".join(lines), encoding="utf-8")
 
 
 if __name__ == "__main__":
