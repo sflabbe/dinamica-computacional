@@ -1,0 +1,6 @@
+*Beam Section, elset=ES_COL_L, material=CONCRETE, section=RECT
+0.30, 0.40
+*Beam Section, elset=ES_COL_R, material=CONCRETE, section=RECT
+0.30, 0.40
+*Beam Section, elset=ES_BEAM, material=CONCRETE, section=RECT
+0.30, 0.50

@@ -1,0 +1,5 @@
+*Material, name=CONCRETE
+*Elastic
+3.0e10, 0.2
+*Density
+2500.

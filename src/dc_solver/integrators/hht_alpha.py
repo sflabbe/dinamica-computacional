@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Callable
 
 import numpy as np
 
 from dc_solver.fem.model import Model
+from dc_solver.reporting import IncrementEnd, IncrementStart, IterationReport
 
 
 def hht_alpha_newton(
@@ -26,6 +27,8 @@ def hht_alpha_newton(
     u0: Optional[np.ndarray] = None,
     v0: Optional[np.ndarray] = None,
     load_hist: Optional[np.ndarray] = None,
+    reporter: Optional[Callable[[object], None]] = None,
+    step_id: int = 1,
 ) -> Dict[str, np.ndarray]:
     if not (-1.0 / 3.0 - 1e-12 <= alpha <= 1e-12):
         raise ValueError("HHT-alpha requires alpha in [-1/3, 0].")
@@ -124,7 +127,20 @@ def hht_alpha_newton(
         u_free = u_pred[fd].copy()
         u_comm_step = u_n.copy()
 
-        for it in range(max_iter):
+        if reporter is not None:
+            reporter(
+                IncrementStart(
+                    step_id=step_id,
+                    inc=n + 1,
+                    attempt=1,
+                    dt=dt,
+                    step_time=float(t[n]),
+                    total_time=float(t[n]),
+                    is_cutback_attempt=False,
+                )
+            )
+
+        for it in range(1, max_iter + 1):
             u_trial = u_comm_step.copy()
             u_trial[fd] = u_free
 
@@ -137,14 +153,52 @@ def hht_alpha_newton(
                 (1.0 + alpha) * Rint - alpha * Rint_n + C[fd] * v_trial[fd] + M[fd] * a_trial[fd]
             )
 
+            res_norm = float(np.linalg.norm(res))
+            res_max = float(np.max(np.abs(res))) if res.size else 0.0
+            res_idx = int(np.argmax(np.abs(res))) if res.size else None
+            res_dof = int(fd[res_idx]) if res_idx is not None else None
             scale = 1.0 + np.linalg.norm(p_alpha[fd])
-            if np.linalg.norm(res) <= tol * scale:
+            if res_norm <= tol * scale:
+                if reporter is not None:
+                    reporter(
+                        IterationReport(
+                            step_id=step_id,
+                            inc=n + 1,
+                            attempt=1,
+                            it=it,
+                            residual_norm=res_norm,
+                            residual_max=res_max,
+                            residual_dof=res_dof,
+                            residual_node=None,
+                            residual_component_label="FORCE",
+                            correction_norm=0.0,
+                            correction_max=0.0,
+                            converged_force=True,
+                            converged_moment=True,
+                            note=None,
+                        )
+                    )
                 u_n = u_trial
                 v_n = v_trial
                 a_n = a_trial
                 model.commit()
-                iters[n] = it + 1
+                iters[n] = it
                 hinge_hist.append(inf["hinges"])
+                if reporter is not None:
+                    reporter(
+                        IncrementEnd(
+                            step_id=step_id,
+                            inc=n + 1,
+                            attempt=1,
+                            converged=True,
+                            n_equil_iters=it,
+                            n_severe_iters=0,
+                            dt_completed=dt,
+                            step_fraction=float((t[n + 1] / t[-1]) if t[-1] != 0 else 1.0),
+                            step_time_completed=float(t[n + 1]),
+                            total_time_completed=float(t[n + 1]),
+                        )
+                    )
                 break
 
             K_eff = (
@@ -156,9 +210,43 @@ def hht_alpha_newton(
                 du = np.linalg.solve(K_eff + 1e-14 * np.eye(nf), res)
             except np.linalg.LinAlgError:
                 du = np.linalg.lstsq(K_eff + 1e-14 * np.eye(nf), res, rcond=None)[0]
+            if reporter is not None:
+                reporter(
+                    IterationReport(
+                        step_id=step_id,
+                        inc=n + 1,
+                        attempt=1,
+                        it=it,
+                        residual_norm=res_norm,
+                        residual_max=res_max,
+                        residual_dof=res_dof,
+                        residual_node=None,
+                        residual_component_label="FORCE",
+                        correction_norm=float(np.linalg.norm(du)),
+                        correction_max=float(np.max(np.abs(du))) if du.size else 0.0,
+                        converged_force=False,
+                        converged_moment=False,
+                        note=None,
+                    )
+                )
             u_free += du
 
         else:
+            if reporter is not None:
+                reporter(
+                    IncrementEnd(
+                        step_id=step_id,
+                        inc=n + 1,
+                        attempt=1,
+                        converged=False,
+                        n_equil_iters=max_iter,
+                        n_severe_iters=0,
+                        dt_completed=dt,
+                        step_fraction=float((t[n + 1] / t[-1]) if t[-1] != 0 else 1.0),
+                        step_time_completed=float(t[n + 1]),
+                        total_time_completed=float(t[n + 1]),
+                    )
+                )
             raise RuntimeError(f"No converge en paso {n+1} / t={t[n+1]:.3f}s (HHT-alpha).")
 
         u_hist[n + 1] = u_n

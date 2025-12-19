@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Callable, Iterable
 
 import numpy as np
 
@@ -66,7 +67,53 @@ def _parse_keyword(line: str) -> Tuple[str, Dict[str, str]]:
     return key, opts
 
 
-def parse_inp(path: str) -> ModelData:
+def _expand_includes(path: str, warning_cb: Optional[Callable[[str], None]] = None) -> List[Tuple[str, int, str]]:
+    base = Path(path)
+    if not base.exists():
+        raise ValueError(f"Input file not found: {path}")
+    seen = set()
+
+    def _read_file(file_path: Path) -> List[Tuple[str, int, str]]:
+        if file_path in seen:
+            msg = f"[inp] Warning: include cycle detected for '{file_path}'."
+            if warning_cb is not None:
+                warning_cb(msg)
+            return []
+        seen.add(file_path)
+        lines: List[Tuple[str, int, str]] = []
+        with file_path.open("r", encoding="utf-8") as f:
+            for line_no, raw in enumerate(f, start=1):
+                line = raw.rstrip("\n")
+                if line.lstrip().startswith("*"):
+                    key, opts = _parse_keyword(line)
+                    if key == "INCLUDE":
+                        include_name = opts.get("input") or opts.get("file")
+                        if not include_name:
+                            raise ValueError(f"{file_path}:{line_no}: *Include missing input= filename.")
+                        include_path = (file_path.parent / include_name).resolve()
+                        lines.extend(_read_file(include_path))
+                        continue
+                lines.append((line, line_no, str(file_path)))
+        return lines
+
+    return _read_file(base.resolve())
+
+
+def _as_int(value: str, source: str, line_no: int) -> int:
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{source}:{line_no}: invalid integer '{value}'.") from exc
+
+
+def _as_float(value: str, source: str, line_no: int) -> float:
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{source}:{line_no}: invalid float '{value}'.") from exc
+
+
+def parse_inp(path: str, warning_cb: Optional[Callable[[str], None]] = None) -> ModelData:
     part = None
     material = None
     steps: List[StepData] = []
@@ -85,134 +132,156 @@ def parse_inp(path: str) -> ModelData:
         "PART", "NODE", "ELEMENT", "NSET", "ELSET", "BEAM SECTION", "MATERIAL",
         "ELASTIC", "DENSITY", "ASSEMBLY", "INSTANCE", "END INSTANCE", "END ASSEMBLY",
         "STEP", "STATIC", "DYNAMIC", "DLOAD", "CLOAD", "BOUNDARY", "AMPLITUDE", "END STEP",
+        "INCLUDE", "END PART", "OUTPUT", "NODE OUTPUT", "ELEMENT OUTPUT",
     }
-
-    with open(path, "r", encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("**"):
-                continue
-            if line.startswith("*"):
-                key, opts = _parse_keyword(line)
-                if key not in supported:
-                    print(f"[inp] Warning: unsupported keyword '*{key}' ignored.")
-                    current_keyword = None
-                    continue
-                current_keyword = key
-                current_opts = opts
-                current_amp = None
-                if key == "PART":
-                    current_part = PartData(name=opts.get("name", "PART-1"))
-                    part = current_part
-                elif key == "MATERIAL":
-                    current_material = MaterialData(name=opts.get("name", "MAT-1"))
-                    material = current_material
-                elif key == "STEP":
-                    current_step = StepData(name=opts.get("name", "STEP-1"), kind="STATIC",
-                                            nlgeom=opts.get("nlgeom", "NO").upper() == "YES")
-                    steps.append(current_step)
-                elif key == "AMPLITUDE":
-                    current_amp = opts.get("name", "AMP-1")
-                    amplitudes[current_amp] = []
-                continue
-
-            if current_keyword == "NODE":
-                fields = [f.strip() for f in line.split(",") if f.strip()]
-                nid = int(fields[0])
-                x = float(fields[1])
-                y = float(fields[2])
-                current_part.nodes[nid] = (x, y)
-            elif current_keyword == "ELEMENT":
-                fields = [f.strip() for f in line.split(",") if f.strip()]
-                eid = int(fields[0])
-                n1 = int(fields[1])
-                n2 = int(fields[2])
-                current_part.elements[eid] = (n1, n2)
-                elset = current_opts.get("elset", "")
-                if elset:
-                    current_part.elsets.setdefault(elset, []).append(eid)
-            elif current_keyword in ("NSET", "ELSET"):
-                target = current_part.nsets if current_keyword == "NSET" else current_part.elsets
-                name = current_opts.get("nset" if current_keyword == "NSET" else "elset", "")
-                if "generate" in current_opts:
-                    values = [int(v.strip()) for v in line.split(",") if v.strip()]
-                    if len(values) >= 3:
-                        if current_keyword == "NSET":
-                            current_part.nset_generate[name] = (values[0], values[1], values[2])
-                        else:
-                            current_part.elset_generate[name] = (values[0], values[1], values[2])
+    for raw, line_no, source in _expand_includes(path, warning_cb=warning_cb):
+        line = raw.strip()
+        if not line or line.startswith("**"):
+            continue
+        if line.startswith("*"):
+            key, opts = _parse_keyword(line)
+            if key not in supported:
+                msg = f"[inp] Warning: unsupported keyword '*{key}' ignored."
+                if warning_cb is not None:
+                    warning_cb(msg)
                 else:
-                    ids = [int(v.strip()) for v in line.split(",") if v.strip()]
-                    target.setdefault(name, []).extend(ids)
-            elif current_keyword == "BEAM SECTION":
-                elset = current_opts.get("elset", "")
-                mat = current_opts.get("material", "")
-                section = current_opts.get("section", "")
+                    print(msg)
+                current_keyword = None
+                continue
+            current_keyword = key
+            current_opts = opts
+            current_amp = None
+            if key == "PART":
+                current_part = PartData(name=opts.get("name", "PART-1"))
+                part = current_part
+            elif key == "MATERIAL":
+                current_material = MaterialData(name=opts.get("name", "MAT-1"))
+                material = current_material
+            elif key == "STEP":
+                current_step = StepData(
+                    name=opts.get("name", "STEP-1"),
+                    kind="STATIC",
+                    nlgeom=opts.get("nlgeom", "NO").upper() == "YES",
+                )
+                steps.append(current_step)
+            elif key == "AMPLITUDE":
+                current_amp = opts.get("name", "AMP-1")
+                amplitudes[current_amp] = []
+            continue
+
+        if current_keyword == "NODE":
+            fields = [f.strip() for f in line.split(",") if f.strip()]
+            if len(fields) < 3:
+                raise ValueError(f"{source}:{line_no}: *Node requires id, x, y.")
+            nid = _as_int(fields[0], source, line_no)
+            x = _as_float(fields[1], source, line_no)
+            y = _as_float(fields[2], source, line_no)
+            current_part.nodes[nid] = (x, y)
+        elif current_keyword == "ELEMENT":
+            fields = [f.strip() for f in line.split(",") if f.strip()]
+            if len(fields) < 3:
+                raise ValueError(f"{source}:{line_no}: *Element requires id, n1, n2.")
+            eid = _as_int(fields[0], source, line_no)
+            n1 = _as_int(fields[1], source, line_no)
+            n2 = _as_int(fields[2], source, line_no)
+            current_part.elements[eid] = (n1, n2)
+            elset = current_opts.get("elset", "")
+            if elset:
+                current_part.elsets.setdefault(elset, []).append(eid)
+        elif current_keyword in ("NSET", "ELSET"):
+            target = current_part.nsets if current_keyword == "NSET" else current_part.elsets
+            name = current_opts.get("nset" if current_keyword == "NSET" else "elset", "")
+            if "generate" in current_opts:
+                values = [v.strip() for v in line.split(",") if v.strip()]
+                if len(values) >= 3:
+                    start = _as_int(values[0], source, line_no)
+                    end = _as_int(values[1], source, line_no)
+                    step = _as_int(values[2], source, line_no)
+                    if current_keyword == "NSET":
+                        current_part.nset_generate[name] = (start, end, step)
+                    else:
+                        current_part.elset_generate[name] = (start, end, step)
+            else:
+                ids = [_as_int(v.strip(), source, line_no) for v in line.split(",") if v.strip()]
+                target.setdefault(name, []).extend(ids)
+        elif current_keyword == "BEAM SECTION":
+            elset = current_opts.get("elset", "")
+            mat = current_opts.get("material", "")
+            section = current_opts.get("section", "")
+            fields = [f.strip() for f in line.split(",") if f.strip()]
+            if len(fields) < 2:
+                raise ValueError(f"{source}:{line_no}: *Beam Section requires b, h.")
+            b = _as_float(fields[0], source, line_no)
+            h = _as_float(fields[1], source, line_no)
+            current_part.beam_section[elset] = (section, b, h, mat)
+        elif current_keyword == "ELASTIC":
+            fields = [f.strip() for f in line.split(",") if f.strip()]
+            if not fields:
+                raise ValueError(f"{source}:{line_no}: *Elastic requires at least E.")
+            current_material.E = _as_float(fields[0], source, line_no)
+            current_material.nu = _as_float(fields[1], source, line_no) if len(fields) > 1 else 0.0
+        elif current_keyword == "DENSITY":
+            current_material.density = _as_float(line.split(",")[0].strip(), source, line_no)
+        elif current_keyword == "INSTANCE":
+            fields = [f.strip() for f in line.split(",") if f.strip()]
+            if len(fields) >= 2:
+                assembly_translation = (
+                    _as_float(fields[0], source, line_no),
+                    _as_float(fields[1], source, line_no),
+                )
+        elif current_keyword == "BOUNDARY":
+            if current_opts.get("type", "").upper() == "ACCELERATION":
                 fields = [f.strip() for f in line.split(",") if f.strip()]
-                b = float(fields[0])
-                h = float(fields[1])
-                current_part.beam_section[elset] = (section, b, h, mat)
-            elif current_keyword == "ELASTIC":
-                fields = [f.strip() for f in line.split(",") if f.strip()]
-                current_material.E = float(fields[0])
-                current_material.nu = float(fields[1]) if len(fields) > 1 else 0.0
-            elif current_keyword == "DENSITY":
-                current_material.density = float(line.split(",")[0].strip())
-            elif current_keyword == "INSTANCE":
-                fields = [f.strip() for f in line.split(",") if f.strip()]
-                if len(fields) >= 2:
-                    assembly_translation = (float(fields[0]), float(fields[1]))
-            elif current_keyword == "BOUNDARY":
-                if current_opts.get("type", "").upper() == "ACCELERATION":
-                    fields = [f.strip() for f in line.split(",") if f.strip()]
-                    if len(fields) >= 3 and current_step is not None:
-                        set_name = fields[0]
-                        dof1 = int(fields[1])
-                        dof2 = int(fields[2])
-                        value = float(fields[3]) if len(fields) > 3 else 1.0
-                        amp_name = current_opts.get("amplitude", None)
-                        current_step.accel_bc = (set_name, dof1, value, amp_name)
-                else:
-                    fields = [f.strip() for f in line.split(",") if f.strip()]
-                    if len(fields) >= 3:
-                        set_name = fields[0]
-                        dof1 = int(fields[1])
-                        dof2 = int(fields[2])
-                        value = float(fields[3]) if len(fields) > 3 else 0.0
-                        boundaries.append((set_name, dof1, dof2, value))
-            elif current_keyword == "STATIC":
-                if current_step is not None:
-                    current_step.kind = "STATIC"
-            elif current_keyword == "DYNAMIC":
-                if current_step is not None:
-                    current_step.kind = "DYNAMIC"
-                    fields = [f.strip() for f in line.split(",") if f.strip()]
-                    if len(fields) >= 2:
-                        current_step.dt = float(fields[0])
-                        current_step.time_period = float(fields[1])
-            elif current_keyword == "DLOAD":
-                fields = [f.strip() for f in line.split(",") if f.strip()]
-                if len(fields) >= 5 and fields[1].upper() == "GRAV":
-                    g = float(fields[2])
-                    gx = float(fields[3]) * g
-                    gy = float(fields[4]) * g
-                    if current_step is not None:
-                        current_step.gravity = (gx, gy)
-            elif current_keyword == "CLOAD":
-                if current_step is None:
-                    continue
+                if len(fields) >= 3 and current_step is not None:
+                    set_name = fields[0]
+                    dof1 = _as_int(fields[1], source, line_no)
+                    dof2 = _as_int(fields[2], source, line_no)
+                    value = _as_float(fields[3], source, line_no) if len(fields) > 3 else 1.0
+                    amp_name = current_opts.get("amplitude", None)
+                    current_step.accel_bc = (set_name, dof1, value, amp_name)
+            else:
                 fields = [f.strip() for f in line.split(",") if f.strip()]
                 if len(fields) >= 3:
-                    target = fields[0]
-                    dof = int(fields[1])
-                    value = float(fields[2])
-                    current_step.cloads.append((target, dof, value))
-            elif current_keyword == "AMPLITUDE" and current_amp:
+                    set_name = fields[0]
+                    dof1 = _as_int(fields[1], source, line_no)
+                    dof2 = _as_int(fields[2], source, line_no)
+                    value = _as_float(fields[3], source, line_no) if len(fields) > 3 else 0.0
+                    boundaries.append((set_name, dof1, dof2, value))
+        elif current_keyword == "STATIC":
+            if current_step is not None:
+                current_step.kind = "STATIC"
+        elif current_keyword == "DYNAMIC":
+            if current_step is not None:
+                current_step.kind = "DYNAMIC"
                 fields = [f.strip() for f in line.split(",") if f.strip()]
                 if len(fields) >= 2:
-                    amplitudes[current_amp].append((float(fields[0]), float(fields[1])))
-            else:
+                    current_step.dt = _as_float(fields[0], source, line_no)
+                    current_step.time_period = _as_float(fields[1], source, line_no)
+        elif current_keyword == "DLOAD":
+            fields = [f.strip() for f in line.split(",") if f.strip()]
+            if len(fields) >= 5 and fields[1].upper() == "GRAV":
+                g = _as_float(fields[2], source, line_no)
+                gx = _as_float(fields[3], source, line_no) * g
+                gy = _as_float(fields[4], source, line_no) * g
+                if current_step is not None:
+                    current_step.gravity = (gx, gy)
+        elif current_keyword == "CLOAD":
+            if current_step is None:
                 continue
+            fields = [f.strip() for f in line.split(",") if f.strip()]
+            if len(fields) >= 3:
+                target = fields[0]
+                dof = _as_int(fields[1], source, line_no)
+                value = _as_float(fields[2], source, line_no)
+                current_step.cloads.append((target, dof, value))
+        elif current_keyword == "AMPLITUDE" and current_amp:
+            fields = [f.strip() for f in line.split(",") if f.strip()]
+            if len(fields) >= 2:
+                amplitudes[current_amp].append(
+                    (_as_float(fields[0], source, line_no), _as_float(fields[1], source, line_no))
+                )
+        else:
+            continue
 
     if part is None or material is None:
         raise ValueError("Missing *Part or *Material section.")

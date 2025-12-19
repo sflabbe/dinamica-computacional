@@ -10,6 +10,34 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 
 from dc_solver.fem.model import Model
+from dc_solver.fem.frame2d import rot2d
+
+
+def beam_local_displacements(
+    xi: np.ndarray,
+    L: float,
+    u_local: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return axial displacement, transverse displacement, and dv/dx along a beam in local coords."""
+    s = np.asarray(xi, dtype=float)
+    ux_i, uy_i, th_i, ux_j, uy_j, th_j = u_local
+    u_ax = (1.0 - s) * ux_i + s * ux_j
+
+    s2 = s * s
+    s3 = s2 * s
+    n1 = 1.0 - 3.0 * s2 + 2.0 * s3
+    n2 = L * (s - 2.0 * s2 + s3)
+    n3 = 3.0 * s2 - 2.0 * s3
+    n4 = L * (-s2 + s3)
+    v = n1 * uy_i + n2 * th_i + n3 * uy_j + n4 * th_j
+
+    dn1 = -6.0 * s + 6.0 * s2
+    dn2 = L * (1.0 - 4.0 * s + 3.0 * s2)
+    dn3 = 6.0 * s - 6.0 * s2
+    dn4 = L * (-2.0 * s + 3.0 * s2)
+    dv_ds = dn1 * uy_i + dn2 * th_i + dn3 * uy_j + dn4 * th_j
+    dv_dx = dv_ds / L
+    return u_ax, v, dv_dx
 
 
 def _node_xy(model: Model, u: Optional[np.ndarray] = None) -> np.ndarray:
@@ -117,26 +145,40 @@ def plot_structure_state(
     show_node_ids: bool = True,
 ) -> None:
     xy_ref = _node_xy(model, None)
-    u_plot = _scaled_displacements(model, u, scale)
+    u_plot = _scaled_displacements(model, u, scale) if u is not None else None
     xy = _node_xy(model, u_plot)
 
-    for eb in model.beams:
-        i, j = eb.ni, eb.nj
+    xi = np.linspace(0.0, 1.0, 21)
+    stress_summary = member_stress_summary(model, u) if u is not None else []
+    segments = []
+    stresses = []
+    for idx, eb in enumerate(model.beams):
+        i, _ = eb.ni, eb.nj
+        L, c, s = eb._geom()
+        x_local = xi * L
+        y_local = np.zeros_like(x_local)
+        base = xy_ref[i]
+        r = np.array([[c, -s], [s, c]])
+        ref_pts = base + (r @ np.vstack([x_local, y_local])).T
         ax.plot(
-            [xy_ref[i, 0], xy_ref[j, 0]],
-            [xy_ref[i, 1], xy_ref[j, 1]],
+            ref_pts[:, 0],
+            ref_pts[:, 1],
             linewidth=1.0,
             color="0.85",
             zorder=1,
         )
 
-    stress_summary = member_stress_summary(model, u)
-    segments = []
-    stresses = []
-    for row, eb in zip(stress_summary, model.beams):
-        i, j = eb.ni, eb.nj
-        segments.append([(xy[i, 0], xy[i, 1]), (xy[j, 0], xy[j, 1])])
-        stresses.append(row["sigma_abs_max"])
+        if u_plot is not None:
+            dofs = eb.dofs()
+            u_g = u_plot[dofs]
+            u_l = rot2d(c, s) @ u_g
+            u_ax, v, _ = beam_local_displacements(xi, L, u_l)
+            def_pts = base + (r @ np.vstack([x_local + u_ax, v])).T
+            for a, b in zip(def_pts[:-1], def_pts[1:]):
+                segments.append([(float(a[0]), float(a[1])), (float(b[0]), float(b[1]))])
+                if stress_summary:
+                    stresses.append(stress_summary[idx]["sigma_abs_max"])
+
     if segments:
         lc = LineCollection(segments, array=np.array(stresses), cmap="plasma", linewidths=2.2, zorder=2)
         ax.add_collection(lc)
@@ -147,9 +189,12 @@ def plot_structure_state(
         ax.scatter([xy[i, 0]], [xy[i, 1]], s=60, marker="o")
         ax.text(xy[i, 0], xy[i, 1], f"H{hidx}", fontsize=8, ha="left", va="bottom")
 
-    umag = nodal_displacement_magnitude(model, u)
-    scatter = ax.scatter(xy[:, 0], xy[:, 1], s=26, c=umag, cmap="viridis", zorder=3)
-    ax.figure.colorbar(scatter, ax=ax, label="|u| [m]")
+    if u is None:
+        ax.scatter(xy[:, 0], xy[:, 1], s=26, color="0.2", zorder=3)
+    else:
+        umag = nodal_displacement_magnitude(model, u)
+        scatter = ax.scatter(xy[:, 0], xy[:, 1], s=26, c=umag, cmap="viridis", zorder=3)
+        ax.figure.colorbar(scatter, ax=ax, label="|u| [m]")
     if show_node_ids:
         span = max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]))
         offset = 0.01 * (span if span > 0 else 1.0)
@@ -189,6 +234,8 @@ def plot_structure_states(
     drift_height: float,
     snapshot_limit: Optional[float] = None,
     outfile: str = "problem4_states_members.png",
+    benchmark_kind: Optional[str] = None,
+    benchmark_report: Optional[Dict[str, float]] = None,
 ) -> None:
     if snapshot_limit is None:
         snapshot_limit = float(last.get("snapshot_limit", 0.04))
@@ -222,11 +269,25 @@ def plot_structure_states(
     u_for_scale = [u for u in (u_static, u_peak, u_snap) if u is not None]
     scale = _auto_scale(model, u_for_scale) if u_for_scale else 1.0
 
+    static_label = f"State 2: Static (gravity eq.)\n(scale={scale:.1f}×)"
+    if benchmark_kind == "cantilever" and benchmark_report:
+        static_label = (
+            "State 2: Static\n"
+            f"tip uy={benchmark_report['uy_tip']:.4e} m, "
+            f"theta={benchmark_report['theta_tip']:.4e} rad (scale={scale:.1f}×)"
+        )
+    elif benchmark_kind == "simply_supported" and benchmark_report:
+        static_label = (
+            "State 2: Static\n"
+            f"midspan uy={benchmark_report['uy_mid']:.4e} m (scale={scale:.1f}×)"
+        )
+
     states = [
         ("State 1: Model (undeformed)", None),
-        (f"State 2: Static (gravity eq.)\n(scale={scale:.1f}×)", u_static),
+        (static_label, u_static),
     ]
-    if u_snap is not None:
+    has_dynamic = isinstance(t, np.ndarray) and t.size > 1
+    if has_dynamic and u_snap is not None:
         snap_label = (
             f"State 3: Snapshot (drift ≥ {100.0 * float(snapshot_limit):.2f}%)"
             if snap_reached else
@@ -234,11 +295,12 @@ def plot_structure_states(
         )
         snap_label += f"\n t={t_snap:.3f}s, drift={100.0*drift_snap:.2f}% (scale={scale:.1f}×)"
         states.append((snap_label, u_snap))
-    states.append((
-        f"State {len(states)+1}: Dynamic peak drift\n"
-        f"t={t_peak:.3f}s, drift={100.0*drift_peak:.2f}% (scale={scale:.1f}×)",
-        u_peak,
-    ))
+    if has_dynamic and u_peak is not None:
+        states.append((
+            f"State {len(states)+1}: Dynamic peak drift\n"
+            f"t={t_peak:.3f}s, drift={100.0*drift_peak:.2f}% (scale={scale:.1f}×)",
+            u_peak,
+        ))
 
     n_states = len(states)
     if n_states <= 3:
