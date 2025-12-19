@@ -37,6 +37,16 @@ def _parse_header(line: str) -> Tuple[str, Dict[str, str]]:
     return key, opts
 
 
+def _resolve_nodeset(target: str, nsets: Dict[str, List[int]]) -> List[int]:
+    if target in nsets:
+        return nsets[target]
+    try:
+        return [int(target)]
+    except ValueError as exc:
+        available = ", ".join(sorted(nsets)) or "none"
+        raise ValueError(f"Unknown NSET '{target}'. Available: {available}.") from exc
+
+
 def read_inp(path: str) -> Tuple[Model, AnalysisPlan]:
     with open(path, "r", encoding="utf-8") as f:
         lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("**")]
@@ -292,7 +302,7 @@ def read_inp(path: str) -> Tuple[Model, AnalysisPlan]:
     fixed_dofs = []
     if steps and steps[0].get("boundary"):
         for target, dof1, dof2 in steps[0]["boundary"]:
-            node_list = nsets.get(target, [int(target)])
+            node_list = _resolve_nodeset(target, nsets)
             for nid in node_list:
                 ni = node_index[nid]
                 nd = nodes[ni]
@@ -366,7 +376,7 @@ def read_inp(path: str) -> Tuple[Model, AnalysisPlan]:
 
     if mass_defs:
         for target, val in mass_defs:
-            node_list = nsets.get(target, [int(target)])
+            node_list = _resolve_nodeset(target, nsets)
             for nid in node_list:
                 ni = node_index[nid]
                 nd = nodes[ni]
@@ -388,7 +398,7 @@ def read_inp(path: str) -> Tuple[Model, AnalysisPlan]:
     for step in steps:
         load = np.zeros(ndof)
         for target, dof, val in step.get("cloads", []):
-            node_list = nsets.get(target, [int(target)])
+            node_list = _resolve_nodeset(target, nsets)
             for nid in node_list:
                 ni = node_index[nid]
                 nd = nodes[ni]
