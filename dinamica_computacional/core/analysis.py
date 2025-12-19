@@ -24,9 +24,9 @@ class StaticStep:
 class HHTStep:
     name: str
     load_const: np.ndarray
-    geometry: str = "linear"
     t_end: float
     dt: float
+    geometry: str = "linear"
     alpha: float = -0.05
     drift_limit: float = 0.10
     drift_snapshot: float = 0.04

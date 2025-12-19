@@ -59,3 +59,10 @@ Genera:
 **Criterio de colapso por drift (default): 10% (snapshot/etiquetas a 4%)**
 
 # dinamica-computacional
+
+## Development
+
+```bash
+pip install -e .[dev]
+pytest -q
+```

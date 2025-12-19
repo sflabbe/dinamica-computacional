@@ -17,7 +17,10 @@ def hht_alpha_newton(model: Model,
                      alpha: float = -0.05,
                      max_iter: int = 40,
                      tol: float = 1e-6,
-                     verbose: bool = False) -> Dict[str, np.ndarray]:
+                     verbose: bool = False,
+                     load_hist: Optional[np.ndarray] = None,
+                     u0: Optional[np.ndarray] = None,
+                     v0: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
     if not (-1.0/3.0 - 1e-12 <= alpha <= 1e-12):
         raise ValueError("HHT-alpha requires alpha in [-1/3, 0].")
 
@@ -27,6 +30,17 @@ def hht_alpha_newton(model: Model,
     nd = model.ndof()
     fd = model.free_dofs()
     nf = fd.size
+
+    ag = np.asarray(ag, float)
+    if ag.shape == ():
+        ag = np.full(t.size, float(ag))
+    if ag.shape != (t.size,):
+        raise ValueError("ag must have shape (len(t),).")
+
+    if load_hist is not None:
+        load_hist = np.asarray(load_hist, float)
+        if load_hist.shape != (t.size, nd):
+            raise ValueError("load_hist must have shape (len(t), ndof).")
 
     u = np.zeros(nd)
     u_free = u[fd].copy()
@@ -45,7 +59,14 @@ def hht_alpha_newton(model: Model,
         raise RuntimeError("No converge el paso estático de gravedad.")
 
     u_n = u.copy()
-    v_n = np.zeros(nd)
+    v_n = np.zeros(nd) if v0 is None else np.asarray(v0, float).copy()
+    if v_n.shape != (nd,):
+        raise ValueError("v0 must have shape (ndof,).")
+    if u0 is not None:
+        u0 = np.asarray(u0, float)
+        if u0.shape != (nd,):
+            raise ValueError("u0 must have shape (ndof,).")
+        u_n = u_n + u0
     a_n = np.zeros(nd)
 
     M = model.mass_diag
@@ -60,6 +81,15 @@ def hht_alpha_newton(model: Model,
 
     r = np.zeros(nd)
     r[np.where(M > 0.0)[0]] = 1.0
+
+    p0 = model.load_const.copy()
+    if load_hist is not None:
+        p0 = p0 + load_hist[0]
+    p0 = p0 - M * r * ag[0]
+    _, Rint_init, _ = model.assemble(u_n, u_n)
+    if np.any(M[fd] > 0.0):
+        denom = np.where(M[fd] > 0.0, M[fd], 1.0)
+        a_n[fd] = (p0[fd] - Rint_init - C[fd] * v_n[fd]) / denom
 
     u_hist = np.zeros((t.size, nd))
     v_hist = np.zeros((t.size, nd))
@@ -80,13 +110,15 @@ def hht_alpha_newton(model: Model,
     drift[0] = 0.5 * (u_n[ux2] + u_n[ux3]) / drift_height
     Vb[0] = model.base_shear(u_n)
 
-    p_const = model.load_const.copy()
-
     for n in range(t.size - 1):
         model.update_column_yields(u_n)
 
-        p_n = p_const - M * r * ag[n]
-        p_np1 = p_const - M * r * ag[n+1]
+        if load_hist is not None:
+            p_n = model.load_const + load_hist[n] - M * r * ag[n]
+            p_np1 = model.load_const + load_hist[n + 1] - M * r * ag[n + 1]
+        else:
+            p_n = model.load_const - M * r * ag[n]
+            p_np1 = model.load_const - M * r * ag[n + 1]
         p_alpha = (1.0 + alpha) * p_np1 - alpha * p_n
 
         _, Rint_n, _ = model.assemble(u_n, u_n)
