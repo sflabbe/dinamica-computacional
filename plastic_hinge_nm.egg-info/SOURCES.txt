@@ -1,6 +1,7 @@
 README.md
 pyproject.toml
 plastic_hinge/__init__.py
+plastic_hinge/_numba.py
 plastic_hinge/fiber_section.py
 plastic_hinge/geometry.py
 plastic_hinge/hinge_factory.py

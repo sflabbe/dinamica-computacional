@@ -109,3 +109,29 @@ python -m problems.run_all_problems_2_3_4
 - `plastic_hinge/` : return mapping 2D + superficie poligonal N–M
 - `src/dc_solver/` : FEM + integradores + post-proceso
 - `src/problems/`  : scripts reproducibles por problema
+---
+
+## Aceleración opcional con Numba (JIT)
+
+Si instalas **Numba**, se aceleran kernels numéricos que están en el hot-path:
+
+- proyección / return mapping de la rótula N–M (`plastic_hinge/return_mapping.py`)
+- integración de secciones por fibras (`plastic_hinge/fiber_section.py`)
+
+Instalación (Python ≥ 3.10 recomendado):
+
+```bash
+python -m pip install -e ".[numba]"
+```
+
+Desactivar JIT (por si estás debuggeando o si Numba no anda bien en tu plataforma):
+
+- PowerShell:
+  ```powershell
+  $env:DC_USE_NUMBA="0"
+  python -m problems.problema4_portico --integrator explicit
+  ```
+- Bash:
+  ```bash
+  DC_USE_NUMBA=0 python -m problems.problema4_portico --integrator explicit
+  ```

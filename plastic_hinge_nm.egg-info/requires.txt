@@ -4,5 +4,10 @@ matplotlib
 [dev]
 pytest
 
+[numba]
+
+[numba:python_version >= "3.10"]
+numba>=0.61
+
 [test]
 pytest

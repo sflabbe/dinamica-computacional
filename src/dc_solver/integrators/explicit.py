@@ -44,6 +44,10 @@ def explicit_verlet(
     model.reset_state()
     nd = model.ndof()
     fd = model.free_dofs()
+    # Convenience boolean mask for free DOFs (needed because Model.assemble returns
+    # reduced vectors on free DOFs, while mass/damping are stored on the full DOF set).
+    fd_mask = np.zeros(nd, dtype=bool)
+    fd_mask[fd] = True
 
     # Initial equilibrium under constant loads unless u0/v0 provided
     if u0 is None and v0 is None:
@@ -89,7 +93,8 @@ def explicit_verlet(
     Rint0 = model.internal_force(u_n)
     p0 = model.load_const + load_hist[0] - M * r * ag[0]
     a_n = np.zeros(nd)
-    mass_mask = M > 0.0
+    # Only integrate free DOFs; constrained DOFs must remain fixed.
+    mass_mask = (M > 0.0) & fd_mask
     a_n[mass_mask] = (p0[mass_mask] - Rint0[mass_mask] - C[mass_mask] * v_n[mass_mask]) / M[mass_mask]
 
     # History arrays
@@ -128,8 +133,11 @@ def explicit_verlet(
         v_half = v_n + 0.5 * dt * a_n
         u_np1 = u_n + dt * v_half
 
-        # Evaluate internal forces (trial) and commit hinge state at u_{n+1}
-        K_tan, Rint_np1, inf = model.assemble(u_np1, u_n)
+        # Evaluate internal forces (trial) and commit hinge state at u_{n+1}.
+        # NOTE: Model.assemble returns K_ff and R_f on the FREE DOFs only.
+        _K_tan, Rint_f, inf = model.assemble(u_np1, u_n)
+        Rint_np1 = np.zeros(nd)
+        Rint_np1[fd] = Rint_f
 
         p_np1 = model.load_const + load_hist[n + 1] - M * r * ag[n + 1]
 
