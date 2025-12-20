@@ -3,6 +3,7 @@ from .fiber_section import (
     FiberSection,
     Fiber,
     FiberSection2D,
+    FiberSection2DStateful,
     Fiber2D,
     rectangular_fiber_mesh,
     ConcreteParabolicRect,

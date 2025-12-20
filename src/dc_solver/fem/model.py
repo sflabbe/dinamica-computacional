@@ -9,14 +9,14 @@ import numpy as np
 
 from dc_solver.fem.nodes import Node
 from dc_solver.fem.frame2d import FrameElementLinear2D
-from dc_solver.hinges.models import RotSpringElement, HingeNM2DElement
+from dc_solver.hinges.models import RotSpringElement, HingeNM2DElement, FiberRotSpringElement
 
 
 @dataclass
 class Model:
     nodes: List[Node]
     beams: List[FrameElementLinear2D]
-    hinges: List[RotSpringElement | HingeNM2DElement]
+    hinges: List[RotSpringElement | FiberRotSpringElement | HingeNM2DElement]
     fixed_dofs: np.ndarray
     mass_diag: np.ndarray
     C_diag: np.ndarray

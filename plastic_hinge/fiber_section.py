@@ -294,6 +294,226 @@ class FiberSection2D:
         return float(N), float(M)
 
 
+# --- Stateful steel (elastic-perfect plastic) for cyclic fiber hinges ---------
+
+
+@njit(cache=True)
+def _sigma_c_tangent_scalar(eps: float, fc: float, eps_c0: float, eps_cu: float) -> Tuple[float, float]:
+    """Concrete stress + tangent (compression positive, tension neglected)."""
+    if eps <= 0.0:
+        return 0.0, 0.0
+    if eps <= eps_c0:
+        r = eps / eps_c0
+        sig = fc * (2.0 * r - r * r)
+        Et = (2.0 * fc / eps_c0) * (1.0 - r)
+        return sig, Et
+    if eps <= eps_cu:
+        return fc, 0.0
+    return fc, 0.0
+
+
+@njit(cache=True)
+def _sigma_s_ep_tangent_scalar(eps: float, eps_p_old: float, fy: float, Es: float) -> Tuple[float, float, float]:
+    """Steel elastic-perfect plastic return mapping (1D) with plastic strain state."""
+    sig_trial = Es * (eps - eps_p_old)
+    f = abs(sig_trial) - fy
+    if f <= 0.0:
+        return sig_trial, Es, eps_p_old
+    sgn = 1.0 if sig_trial >= 0.0 else -1.0
+    sig = fy * sgn
+    eps_p_new = eps - sig / Es
+    return sig, 0.0, eps_p_new
+
+
+@njit(cache=True)
+def _fiber_response_tangent_stateful_kernel(
+    eps0: float,
+    kappa: float,
+    A: np.ndarray,
+    y: np.ndarray,
+    mat_id: np.ndarray,
+    eps_p_old: np.ndarray,
+    y_c: float,
+    fc: float,
+    eps_c0: float,
+    eps_cu: float,
+    fy: float,
+    Es: float,
+    do_update: bool,
+    eps_p_new: np.ndarray,
+) -> Tuple[float, float, float, float, float, float]:
+    """Return N,M and tangents dN/de0, dN/dk, dM/de0, dM/dk.
+
+    If do_update=True, eps_p_new is written (steel fibers updated). Otherwise, eps_p_new
+    is ignored (may be used as scratch).
+    """
+    N = 0.0
+    M = 0.0
+    dN_de0 = 0.0
+    dN_dk = 0.0
+    dM_de0 = 0.0
+    dM_dk = 0.0
+
+    n = A.shape[0]
+    for i in range(n):
+        eps = eps0 + kappa * (y_c - y[i])
+        if mat_id[i] == 0:
+            sig, Et = _sigma_c_tangent_scalar(eps, fc, eps_c0, eps_cu)
+            if do_update:
+                eps_p_new[i] = eps_p_old[i]
+        else:
+            sig, Et, epn = _sigma_s_ep_tangent_scalar(eps, eps_p_old[i], fy, Es)
+            if do_update:
+                eps_p_new[i] = epn
+
+        Ai = A[i]
+        lever = (y[i] - y_c)
+        d_eps_dk = (y_c - y[i])
+
+        N += sig * Ai
+        M += sig * Ai * lever
+
+        dN_de0 += Et * Ai
+        dN_dk += Et * Ai * d_eps_dk
+        dM_de0 += Et * Ai * lever
+        dM_dk += Et * Ai * lever * d_eps_dk
+
+    return N, M, dN_de0, dN_dk, dM_de0, dM_dk
+
+
+@dataclass
+class FiberSection2DStateful:
+    """2D fiber section with stateful steel (plastic strain per fiber).
+
+    Notes
+    -----
+    * Supports only ConcreteParabolicRect (mat_id=0) and SteelBilinearPerfect (mat_id=1)
+      for packing/JIT.
+    * Uses an **elastic-perfect plastic** steel model with plastic-strain memory.
+    """
+
+    fibers: List[Fiber2D]
+    y_c: float
+    z_c: float = 0.0
+
+    _pack: Optional[Dict[str, Any]] = None
+    _eps_p: Optional[np.ndarray] = None
+    _eps_p_trial: Optional[np.ndarray] = None
+
+    def _pack_for_numba(self) -> Optional[Dict[str, Any]]:
+        n = len(self.fibers)
+        if n == 0:
+            return None
+
+        A = np.empty(n, dtype=float)
+        y = np.empty(n, dtype=float)
+        mat_id = np.empty(n, dtype=np.int8)
+
+        conc: Optional[ConcreteParabolicRect] = None
+        steel: Optional[SteelBilinearPerfect] = None
+
+        for i, f in enumerate(self.fibers):
+            A[i] = float(f.A)
+            y[i] = float(f.y)
+            if isinstance(f.mat, ConcreteParabolicRect):
+                mat_id[i] = 0
+                conc = f.mat if conc is None else conc
+            elif isinstance(f.mat, SteelBilinearPerfect):
+                mat_id[i] = 1
+                steel = f.mat if steel is None else steel
+            else:
+                return None
+
+        if conc is None:
+            conc = ConcreteParabolicRect(fc=0.0)
+        if steel is None:
+            steel = SteelBilinearPerfect(fy=0.0)
+
+        return {
+            "A": A,
+            "y": y,
+            "mat_id": mat_id,
+            "fc": float(conc.fc),
+            "eps_c0": float(conc.eps_c0),
+            "eps_cu": float(conc.eps_cu),
+            "fy": float(steel.fy),
+            "Es": float(steel.Es),
+        }
+
+    def reset_state(self) -> None:
+        """Reset steel plastic strains to zero."""
+        if self._eps_p is not None:
+            self._eps_p[:] = 0.0
+
+    def _ensure_state(self) -> None:
+        if self._pack is None:
+            self._pack = self._pack_for_numba()
+        if self._pack is None:
+            raise RuntimeError("FiberSection2DStateful: unsupported materials for JIT/packing")
+        n = int(self._pack["A"].shape[0])
+        if self._eps_p is None or self._eps_p.shape[0] != n:
+            self._eps_p = np.zeros(n, dtype=float)
+        if self._eps_p_trial is None or self._eps_p_trial.shape[0] != n:
+            self._eps_p_trial = np.zeros(n, dtype=float)
+
+    def response_tangent(self, eps0: float, kappa: float) -> Tuple[float, float, float, float, float, float]:
+        """Return N,M and tangents without updating state (trial evaluation)."""
+        self._ensure_state()
+        assert self._pack is not None and self._eps_p is not None and self._eps_p_trial is not None
+        p = self._pack
+        N, M, dN_de0, dN_dk, dM_de0, dM_dk = _fiber_response_tangent_stateful_kernel(
+            float(eps0),
+            float(kappa),
+            p["A"],
+            p["y"],
+            p["mat_id"],
+            self._eps_p,
+            float(self.y_c),
+            float(p["fc"]),
+            float(p["eps_c0"]),
+            float(p["eps_cu"]),
+            float(p["fy"]),
+            float(p["Es"]),
+            False,
+            self._eps_p_trial,
+        )
+        return float(N), float(M), float(dN_de0), float(dN_dk), float(dM_de0), float(dM_dk)
+
+    def trial_update(self, eps0: float, kappa: float) -> Tuple[float, float, float, float, float, float]:
+        """Return N,M and tangents and update *trial* steel plastic strains.
+
+        This does **not** modify the committed plastic strains. Call commit_trial()
+        after the global step is accepted.
+        """
+        self._ensure_state()
+        assert self._pack is not None and self._eps_p is not None and self._eps_p_trial is not None
+        p = self._pack
+        N, M, dN_de0, dN_dk, dM_de0, dM_dk = _fiber_response_tangent_stateful_kernel(
+            float(eps0),
+            float(kappa),
+            p["A"],
+            p["y"],
+            p["mat_id"],
+            self._eps_p,
+            float(self.y_c),
+            float(p["fc"]),
+            float(p["eps_c0"]),
+            float(p["eps_cu"]),
+            float(p["fy"]),
+            float(p["Es"]),
+            True,
+            self._eps_p_trial,
+        )
+
+        return float(N), float(M), float(dN_de0), float(dN_dk), float(dM_de0), float(dM_dk)
+
+    def commit_trial(self) -> None:
+        """Commit trial plastic strains (after an accepted global increment)."""
+        self._ensure_state()
+        assert self._eps_p is not None and self._eps_p_trial is not None
+        self._eps_p[:] = self._eps_p_trial
+
+
 def _clustered_edges_01(n: int, kind: str = "cosine") -> np.ndarray:
     """Return n+1 edges in [0,1] with optional clustering near 0 and 1."""
 

@@ -1,4 +1,4 @@
-"""Problema 5: Curva de interacción N–M usando una sección discretizada por fibras (malla 2D).
+r"""Problema 5: Curva de interacción N–M usando una sección discretizada por fibras (malla 2D).
 
 Objetivo
 --------

@@ -16,7 +16,17 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 
-from plastic_hinge import RCSectionRect, RebarLayer, NMSurfacePolygon, PlasticHingeNM
+from plastic_hinge import (
+    RCSectionRect,
+    RebarLayer,
+    NMSurfacePolygon,
+    PlasticHingeNM,
+    ConcreteParabolicRect,
+    SteelBilinearPerfect,
+    Fiber2D,
+    FiberSection2DStateful,
+    rectangular_fiber_mesh,
+)
 
 from dc_solver.fem.nodes import Node, DofManager
 from dc_solver.fem.frame2d import FrameElementLinear2D
@@ -26,6 +36,8 @@ from dc_solver.hinges.models import (
     ColumnHingeNM2D,
     HingeNM2DElement,
     SHMBeamHinge1D,
+    FiberBeamHinge1D,
+    FiberRotSpringElement,
     RotSpringElement,
     moment_capacity_from_polygon,
 )
@@ -43,6 +55,66 @@ def mirror_section_about_middepth(sec: RCSectionRect) -> RCSectionRect:
                          layers=layers, n_fibers=sec.n_fibers)
 
 
+def build_rc_rect_fiber_section_2d_stateful(
+    *,
+    b: float,
+    h: float,
+    cover: float,
+    fc: float,
+    fy: float,
+    Es: float = 200e9,
+    eps_c0: float = 0.002,
+    eps_cu: float = 0.0035,
+    ny: int = 50,
+    nz: int = 30,
+    clustering: str = "cosine",
+    # Rebars described as (As_layer, y, n_bars)
+    rebar_layers: list[tuple[float, float, int]] | None = None,
+) -> FiberSection2DStateful:
+    """Create a rectangular RC fiber section (2D mesh) with stateful steel.
+
+    * Concrete: ConcreteParabolicRect (compression-only)
+    * Steel: SteelBilinearPerfect parameters (fy,Es) but with stateful EP return mapping
+      inside FiberSection2DStateful.
+
+    Coordinates
+    -----------
+    y=0 at top fiber, y=h at bottom.
+    z is across width, centered at z=0.
+    """
+
+    conc = ConcreteParabolicRect(fc=fc, eps_c0=eps_c0, eps_cu=eps_cu)
+    steel = SteelBilinearPerfect(fy=fy, Es=Es)
+
+    fibers: list[Fiber2D] = []
+    fibers.extend(
+        rectangular_fiber_mesh(
+            b=b,
+            h=h,
+            ny=ny,
+            nz=nz,
+            mat=conc,
+            clustering=clustering,
+        )
+    )
+
+    if rebar_layers:
+        for As_layer, y_layer, n_bars in rebar_layers:
+            n_bars = max(1, int(n_bars))
+            As_bar = float(As_layer) / float(n_bars)
+            z_min = -0.5 * (b - 2.0 * cover)
+            z_max = +0.5 * (b - 2.0 * cover)
+            if n_bars == 1:
+                z_pos = [0.0]
+            else:
+                z_pos = np.linspace(z_min, z_max, n_bars).tolist()
+            for z in z_pos:
+                fibers.append(Fiber2D(A=As_bar, y=float(y_layer), z=float(z), mat=steel))
+
+    sec = FiberSection2DStateful(fibers=fibers, y_c=0.5 * h, z_c=0.0)
+    return sec
+
+
 def build_nm_surface(sec: RCSectionRect, npts: int = 90, tension_positive: bool = True) -> NMSurfacePolygon:
     pts1 = sec.sample_interaction_curve(n=npts)
     pts2 = mirror_section_about_middepth(sec).sample_interaction_curve(n=npts)
@@ -54,10 +126,13 @@ def build_nm_surface(sec: RCSectionRect, npts: int = 90, tension_positive: bool 
     return NMSurfacePolygon.from_points(pts)
 
 
-def _outputs_dir() -> Path:
+def _outputs_dir(subdir: Optional[str] = None) -> Path:
     root = Path(__file__).resolve().parents[2]
     out = root / "outputs"
     out.mkdir(parents=True, exist_ok=True)
+    if subdir:
+        out = out / str(subdir)
+        out.mkdir(parents=True, exist_ok=True)
     return out
 
 
@@ -74,6 +149,7 @@ def build_portal_beam_hinge(
     nseg: int = 6,
     cover: float = 0.05,
     nlgeom: bool = False,
+    beam_hinge: str = "shm",  # "shm" | "fiber"
 ) -> Tuple[Model, Dict]:
     dm = DofManager()
 
@@ -90,10 +166,11 @@ def build_portal_beam_hinge(
         nodes.append(na)
         return len(nodes) - 1
 
+    # Aux nodes:
+    # - Column bases: separate rotation DOF so base hinges act between (base node) and (column bottom).
+    # - Beam ends: separate rotation DOF so beam end hinges act between (joint node) and (beam end).
     i0L = aux_at(0)
-    i2L = aux_at(2)
     i1R = aux_at(1)
-    i3R = aux_at(3)
     i2B = aux_at(2)
     i3B = aux_at(3)
 
@@ -127,8 +204,10 @@ def build_portal_beam_hinge(
     E = 30e9
 
     nseg_use = int(nseg)
-    left_nodes = discretize_member(i0L, i2L, nseg_use, nodes, dm)
-    right_nodes = discretize_member(i1R, i3R, nseg_use, nodes, dm)
+    # IMPORTANT: columns connect to the *joint* nodes (2,3) so joint rotations are shared.
+    # Only the beam end is decoupled via the rotational spring (2 -> i2B and 3 -> i3B).
+    left_nodes = discretize_member(i0L, 2, nseg_use, nodes, dm)
+    right_nodes = discretize_member(i1R, 3, nseg_use, nodes, dm)
     beam_nodes = discretize_member(i2B, i3B, nseg_use, nodes, dm)
 
     beams: List[FrameElementLinear2D] = []
@@ -150,7 +229,7 @@ def build_portal_beam_hinge(
     KN_col = E * A_col / Lp_col
     KM_col = E * I_col / Lp_col
 
-    hinges: List[RotSpringElement | HingeNM2DElement] = []
+    hinges: List[RotSpringElement | FiberRotSpringElement | HingeNM2DElement] = []
     hinge_left = ColumnHingeNM2D(
         hinge=PlasticHingeNM(surface=surf_col, K=np.diag([KN_col, KM_col]), enable_substepping=True),
     )
@@ -160,10 +239,53 @@ def build_portal_beam_hinge(
     hinges.append(HingeNM2DElement(0, i0L, hinge_left, nodes))
     hinges.append(HingeNM2DElement(1, i1R, hinge_right, nodes))
 
-    shm_left = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
-    shm_right = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
-    hinges.append(RotSpringElement(2, i2B, "beam_shm", None, shm_left, nodes))
-    hinges.append(RotSpringElement(3, i3B, "beam_shm", None, shm_right, nodes))
+    beam_hinge = str(beam_hinge).lower().strip()
+    if beam_hinge == "shm":
+        shm_left = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
+        shm_right = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
+        hinges.append(RotSpringElement(2, i2B, "beam_shm", None, shm_left, nodes))
+        hinges.append(RotSpringElement(3, i3B, "beam_shm", None, shm_right, nodes))
+    elif beam_hinge == "fiber":
+        # Fiber hinge: same materials as above but with stateful steel (better unloading / residual strains)
+        beam_sec = build_rc_rect_fiber_section_2d_stateful(
+            b=b_beam,
+            h=h_beam,
+            cover=cover,
+            fc=fc,
+            fy=fy,
+            Es=Es,
+            ny=50,
+            nz=30,
+            clustering="cosine",
+            rebar_layers=[
+                (3 * _rebar_area(phi20), cover, 3),
+                (2 * _rebar_area(phi20), h_beam - cover, 2),
+            ],
+        )
+        # Separate sections for left/right so the state does not leak between hinges.
+        beam_sec_R = build_rc_rect_fiber_section_2d_stateful(
+            b=b_beam,
+            h=h_beam,
+            cover=cover,
+            fc=fc,
+            fy=fy,
+            Es=Es,
+            ny=50,
+            nz=30,
+            clustering="cosine",
+            rebar_layers=[
+                (3 * _rebar_area(phi20), cover, 3),
+                (2 * _rebar_area(phi20), h_beam - cover, 2),
+            ],
+        )
+
+        Lp_beam = 0.5 * h_beam
+        fiber_left = FiberBeamHinge1D(section=beam_sec, Lp=Lp_beam, N_target=0.0)
+        fiber_right = FiberBeamHinge1D(section=beam_sec_R, Lp=Lp_beam, N_target=0.0)
+        hinges.append(FiberRotSpringElement(2, i2B, fiber_left, nodes))
+        hinges.append(FiberRotSpringElement(3, i3B, fiber_right, nodes))
+    else:
+        raise ValueError(f"Unknown beam_hinge: {beam_hinge!r} (use 'shm' or 'fiber')")
 
     fixed = np.array([
         nodes[0].dof_u[0], nodes[0].dof_u[1], nodes[0].dof_th,
@@ -304,6 +426,8 @@ def export_hinge_hysteresis_gradient(
     fig, axes = plt.subplots(len(selected), 1, figsize=(7.2, 2.4 * len(selected)), squeeze=False)
     axes = axes[:, 0]
 
+    extras_keys = ["a", "N", "N_res", "eps0", "kappa", "iters", "active", "My"]
+
     last_lc = None
     for ax, ih in zip(axes, selected):
         dofs = np.asarray(hinges[ih].dofs(), dtype=int)
@@ -319,9 +443,21 @@ def export_hinge_hysteresis_gradient(
         ax.set_ylabel(f"M [N-m]\n#{ih} {kind} ({ni}-{nj})")
         ax.grid(True, alpha=0.3)
 
-        # CSV export for this hinge
-        csv = np.column_stack([time, dth, M])
-        np.savetxt(out / f"problem4_hinge_{ih}_{kind}_hysteresis.csv", csv, delimiter=",", header="t,dtheta,M", comments="")
+        # CSV export for this hinge (include optional debug fields if present)
+        cols = [time, dth, M]
+        headers = ["t", "dtheta", "M"]
+        for k in extras_keys:
+            arr = np.array([hinge_hist[kk][ih].get(k, float("nan")) for kk in range(n)], dtype=float)
+            cols.append(arr)
+            headers.append(k)
+        csv = np.column_stack(cols)
+        np.savetxt(
+            out / f"problem4_hinge_{ih}_{kind}_hysteresis.csv",
+            csv,
+            delimiter=",",
+            header=",".join(headers),
+            comments="",
+        )
 
     axes[-1].set_xlabel("Δθ [rad]")
     if last_lc is not None:
@@ -371,6 +507,7 @@ def run_incremental_amplitudes(
     nseg: int = 6,
     cover: float = 0.05,
     nlgeom: bool = False,
+    beam_hinge: str = "shm",
 ):
     g = 9.81
     model, meta = build_portal_beam_hinge(
@@ -382,6 +519,7 @@ def run_incremental_amplitudes(
         nseg=nseg,
         cover=cover,
         nlgeom=nlgeom,
+        beam_hinge=beam_hinge,
     )
 
     peak_drifts = []
@@ -440,10 +578,12 @@ def plot_results(
     meta: Dict,
     drift_limit: float = 0.10,
     snapshot_limit: Optional[float] = None,
+    outdir: Optional[Path] = None,
 ) -> None:
     if last is None:
         return
-    out = _outputs_dir()
+    out = _outputs_dir() if outdir is None else Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
     H = float(meta.get("H", 1.0))
     plot_structure_states(
         model,
@@ -481,6 +621,12 @@ def main():
     parser.add_argument("--integrator", default="hht", choices=["hht", "newmark", "explicit"], help="Time integrator.")
     parser.add_argument("--nlgeom", action="store_true", help="Enable geometric nonlinearity (P-Delta).")
     parser.add_argument("--nseg", type=int, default=6, help="Segments per member (visualization/mesh).")
+    parser.add_argument(
+        "--beam-hinge",
+        default="shm",
+        choices=["shm", "fiber", "compare"],
+        help="Beam end hinge model: 'shm', 'fiber', or 'compare' (runs both).",
+    )
     args = parser.parse_args()
 
     drift_limit = 0.10
@@ -489,25 +635,9 @@ def main():
     nseg = int(args.nseg)
     nlgeom = bool(args.nlgeom)
 
-    peak_drifts, amps_used, last, model, meta = run_incremental_amplitudes(
-        integrator=args.integrator,
-        H=3.0,
-        L=5.0,
-        T0=0.5,
-        zeta=0.02,
-        drift_limit=drift_limit,
-        amps_g=np.arange(0.1, 2.1, 0.1),
-        t_end=10.0,
-        base_dt=0.002,
-        dt_min=0.00025,
-        alpha=alpha,
-        nseg=nseg,
-        nlgeom=nlgeom,
-    )
-    plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit)
-
-    out = _outputs_dir()
-    if last is not None:
+    def _write_basic_plots(out: Path, last: Optional[Dict[str, np.ndarray]]) -> None:
+        if last is None:
+            return
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.plot(last["t"], last["drift"], label="drift")
         ax.axhline(drift_limit, color="r", linestyle="--", label="limit")
@@ -528,20 +658,131 @@ def main():
         fig.savefig(out / "problem4_vb_drift.png", dpi=160)
         plt.close(fig)
 
-    lines = [
-        "Problem 4 summary",
-        f"drift_limit={drift_limit:.3f}",
-        f"snapshot_limit={snapshot_limit:.3f}",
-        f"alpha={alpha:.3f}",
-        "A_g,peak_drift,dt",
-    ]
-    dt_hist = meta.get("dt_hist", [])
-    for i, (amp, drift) in enumerate(zip(amps_used, peak_drifts)):
-        dt_val = dt_hist[i] if i < len(dt_hist) else float("nan")
-        lines.append(f"{amp:.3f},{drift:.6f},{dt_val:.6f}")
-    if amps_used.size:
-        lines.append(f"collapse_A_g={amps_used[-1]:.3f}")
-    (out / "problem4_summary.txt").write_text("\n".join(lines), encoding="utf-8")
+    def _write_summary(out: Path, meta: Dict, amps_used: np.ndarray, peak_drifts: list[float]) -> None:
+        lines = [
+            "Problem 4 summary",
+            f"beam_hinge={args.beam_hinge}",
+            f"integrator={args.integrator}",
+            f"drift_limit={drift_limit:.3f}",
+            f"snapshot_limit={snapshot_limit:.3f}",
+            f"alpha={alpha:.3f}",
+            "A_g,peak_drift,dt",
+        ]
+        dt_hist = meta.get("dt_hist", [])
+        for i, (amp, drift) in enumerate(zip(amps_used, peak_drifts)):
+            dt_val = dt_hist[i] if i < len(dt_hist) else float("nan")
+            lines.append(f"{amp:.3f},{drift:.6f},{dt_val:.6f}")
+        if amps_used.size:
+            lines.append(f"collapse_A_g={amps_used[-1]:.3f}")
+        (out / "problem4_summary.txt").write_text("\n".join(lines), encoding="utf-8")
+
+    if args.beam_hinge != "compare":
+        out = _outputs_dir(f"problem4_{args.beam_hinge}_{args.integrator}")
+        peak_drifts, amps_used, last, model, meta = run_incremental_amplitudes(
+            integrator=args.integrator,
+            H=3.0,
+            L=5.0,
+            T0=0.5,
+            zeta=0.02,
+            drift_limit=drift_limit,
+            amps_g=np.arange(0.1, 2.1, 0.1),
+            t_end=10.0,
+            base_dt=0.002,
+            dt_min=0.00025,
+            alpha=alpha,
+            nseg=nseg,
+            nlgeom=nlgeom,
+            beam_hinge=args.beam_hinge,
+        )
+        plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out)
+        _write_basic_plots(out, last)
+        _write_summary(out, meta, amps_used, peak_drifts)
+        return
+
+    # compare mode
+    out_shm = _outputs_dir(f"problem4_shm_{args.integrator}")
+    out_fib = _outputs_dir(f"problem4_fiber_{args.integrator}")
+    out_cmp = _outputs_dir(f"problem4_compare_{args.integrator}")
+
+    pd_shm, amps_shm, last_shm, model_shm, meta_shm = run_incremental_amplitudes(
+        integrator=args.integrator,
+        H=3.0,
+        L=5.0,
+        T0=0.5,
+        zeta=0.02,
+        drift_limit=drift_limit,
+        amps_g=np.arange(0.1, 2.1, 0.1),
+        t_end=10.0,
+        base_dt=0.002,
+        dt_min=0.00025,
+        alpha=alpha,
+        nseg=nseg,
+        nlgeom=nlgeom,
+        beam_hinge="shm",
+    )
+    plot_results(last_shm, model_shm, meta_shm, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out_shm)
+    _write_basic_plots(out_shm, last_shm)
+    _write_summary(out_shm, meta_shm, amps_shm, pd_shm)
+
+    pd_fib, amps_fib, last_fib, model_fib, meta_fib = run_incremental_amplitudes(
+        integrator=args.integrator,
+        H=3.0,
+        L=5.0,
+        T0=0.5,
+        zeta=0.02,
+        drift_limit=drift_limit,
+        amps_g=np.arange(0.1, 2.1, 0.1),
+        t_end=10.0,
+        base_dt=0.002,
+        dt_min=0.00025,
+        alpha=alpha,
+        nseg=nseg,
+        nlgeom=nlgeom,
+        beam_hinge="fiber",
+    )
+    plot_results(last_fib, model_fib, meta_fib, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out_fib)
+    _write_basic_plots(out_fib, last_fib)
+    _write_summary(out_fib, meta_fib, amps_fib, pd_fib)
+
+    # compare summary + overlay
+    common_n = min(len(amps_shm), len(amps_fib))
+    amps = amps_shm[:common_n]
+    y_shm = np.array(pd_shm[:common_n], dtype=float)
+    y_fib = np.array(pd_fib[:common_n], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    ax.plot(amps, y_shm, marker="o", label="SHM beam hinge")
+    ax.plot(amps, y_fib, marker="s", label="Fiber beam hinge")
+    ax.axhline(drift_limit, color="r", linestyle="--", label="limit")
+    ax.set_xlabel("A_g [g]")
+    ax.set_ylabel("Peak drift")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_cmp / "problem4_compare_peakdrift.png", dpi=170)
+    plt.close(fig)
+
+    if last_shm is not None and last_fib is not None:
+        fig, ax = plt.subplots(figsize=(6.4, 4.2))
+        ax.plot(last_shm["drift"], last_shm["Vb"], label="SHM")
+        ax.plot(last_fib["drift"], last_fib["Vb"], label="Fiber")
+        ax.set_xlabel("Drift")
+        ax.set_ylabel("Base shear [N]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(out_cmp / "problem4_compare_vb_drift.png", dpi=170)
+        plt.close(fig)
+
+    # CSV summary
+    dt_shm = meta_shm.get("dt_hist", [])
+    dt_fib = meta_fib.get("dt_hist", [])
+    lines = ["A_g,peak_drift_shm,peak_drift_fiber,dt_shm,dt_fiber"]
+    for i in range(common_n):
+        dts = dt_shm[i] if i < len(dt_shm) else float("nan")
+        dtf = dt_fib[i] if i < len(dt_fib) else float("nan")
+        lines.append(f"{amps[i]:.3f},{y_shm[i]:.6f},{y_fib[i]:.6f},{dts:.6f},{dtf:.6f}")
+    (out_cmp / "problem4_compare_summary.csv").write_text("\n".join(lines), encoding="utf-8")
 
 
 if __name__ == "__main__":

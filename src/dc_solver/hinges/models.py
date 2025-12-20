@@ -8,7 +8,7 @@ from typing import Dict, Optional, Tuple, List
 
 import numpy as np
 
-from plastic_hinge import NMSurfacePolygon, PlasticHingeNM
+from plastic_hinge import NMSurfacePolygon, PlasticHingeNM, FiberSection2DStateful
 from dc_solver.fem.nodes import Node
 
 
@@ -138,6 +138,224 @@ class SHMBeamHinge1D:
         My = self.My_0 * math.exp(-self.cMy * a)
         k_tan = self.alpha_post * K0 + (1.0 - self.alpha_post) * My * (1.0 - self.pinch)
         return M, k_tan, th, a, M
+
+
+@dataclass
+class FiberBeamHinge1D:
+    """Beam end hinge based on a stateful fiber section (RC).
+
+    The hinge uses a plastic-hinge length Lp and assumes:
+        theta = kappa * Lp  =>  kappa = theta / Lp
+
+    For the *beam hinge* we typically want **pure bending**, so we enforce:
+        N(eps0, kappa) = N_target
+    by solving for eps0 each evaluation.
+
+    Notes
+    -----
+    * Steel is elastic-perfect plastic with plastic-strain memory (handled by
+      FiberSection2DStateful).
+    * Concrete is compression-only (parabolic-rectangular) and path-independent.
+    """
+
+    section: FiberSection2DStateful
+    Lp: float
+    N_target: float = 0.0
+    max_iter: int = 25
+    tol_N: float = 1e-2
+    tol_eps0: float = 1e-10
+
+    # committed state
+    th_comm: float = 0.0
+    M_comm: float = 0.0
+    a_comm: float = 0.0
+    eps0_comm: float = 0.0
+
+    # last trial cache
+    _trial: Optional[Dict] = None
+
+    def reset_state(self) -> None:
+        self.th_comm = 0.0
+        self.M_comm = 0.0
+        self.a_comm = 0.0
+        self.eps0_comm = 0.0
+        self._trial = None
+        if hasattr(self.section, "reset_state"):
+            self.section.reset_state()
+
+    def _solve_eps0_newton(self, kappa: float) -> Tuple[float, int, float]:
+        """Solve N(eps0, kappa) = N_target for eps0 using Newton with fallback."""
+
+        eps0 = float(self.eps0_comm)
+        it = 0
+        resN = 0.0
+        for it in range(1, int(self.max_iter) + 1):
+            N, _M, dN_de0, _dN_dk, _dM_de0, _dM_dk = self.section.response_tangent(eps0, kappa)
+            resN = float(N - self.N_target)
+            if abs(resN) <= self.tol_N:
+                return eps0, it, resN
+            if abs(dN_de0) < 1e-16:
+                break
+            deps = -resN / float(dN_de0)
+            # simple damping to avoid wild jumps in deep plasticity
+            deps = float(np.clip(deps, -2e-3, 2e-3))
+            eps0_new = eps0 + deps
+            if abs(eps0_new - eps0) <= self.tol_eps0:
+                eps0 = eps0_new
+                return eps0, it, resN
+            eps0 = eps0_new
+
+        # Fallback: bracket + bisection around last eps0
+        a = eps0 - 0.01
+        b = eps0 + 0.01
+        Na, *_ = self.section.response_tangent(a, kappa)
+        Nb, *_ = self.section.response_tangent(b, kappa)
+        fa = float(Na - self.N_target)
+        fb = float(Nb - self.N_target)
+        # expand bracket if needed
+        for _ in range(10):
+            if fa * fb <= 0.0:
+                break
+            a -= 0.01
+            b += 0.01
+            Na, *_ = self.section.response_tangent(a, kappa)
+            Nb, *_ = self.section.response_tangent(b, kappa)
+            fa = float(Na - self.N_target)
+            fb = float(Nb - self.N_target)
+
+        if fa * fb > 0.0:
+            # no bracket: return last Newton eps0
+            return eps0, it, resN
+
+        for j in range(30):
+            m = 0.5 * (a + b)
+            Nm, *_ = self.section.response_tangent(m, kappa)
+            fm = float(Nm - self.N_target)
+            if abs(fm) <= self.tol_N:
+                return m, it + j + 1, fm
+            if fa * fm <= 0.0:
+                b = m
+                fb = fm
+            else:
+                a = m
+                fa = fm
+        m = 0.5 * (a + b)
+        Nm, *_ = self.section.response_tangent(m, kappa)
+        fm = float(Nm - self.N_target)
+        return m, it + 30, fm
+
+    def eval_increment(self, dth: float) -> Tuple[float, float, float, float, float, Dict]:
+        """Evaluate increment dtheta and store trial state.
+
+        Returns
+        -------
+        M, k_tan, th_new, a_new, M_new, extra
+        """
+        th_new = float(self.th_comm) + float(dth)
+        kappa = th_new / max(float(self.Lp), 1e-12)
+
+        eps0, iters, resN = self._solve_eps0_newton(kappa)
+
+        # Final evaluation and update steel plastic strains to a *trial* state
+        N, M, dN_de0, dN_dk, dM_de0, dM_dk = self.section.trial_update(eps0, kappa)
+
+        # Effective tangent under constraint dN = 0: de0/dk = -dN_dk/dN_de0
+        if abs(dN_de0) > 1e-16:
+            de0_dk = -float(dN_dk) / float(dN_de0)
+            dM_dk_eff = float(dM_dk) + float(dM_de0) * de0_dk
+        else:
+            dM_dk_eff = float(dM_dk)
+        k_tan = dM_dk_eff / max(float(self.Lp), 1e-12)
+
+        # cumulative dissipation proxy
+        dW = 0.5 * (float(self.M_comm) + float(M)) * float(dth)
+        a_new = float(self.a_comm) + abs(float(dW))
+
+        self._trial = {
+            "th_new": th_new,
+            "M_new": float(M),
+            "a_new": a_new,
+            "eps0_new": float(eps0),
+            "kappa": float(kappa),
+            "N_res": float(N - self.N_target),
+            "iters": int(iters),
+        }
+
+        extra = {
+            "N": float(N),
+            "N_res": float(N - self.N_target),
+            "eps0": float(eps0),
+            "kappa": float(kappa),
+            "iters": int(iters),
+        }
+        return float(M), float(k_tan), float(th_new), float(a_new), float(M), extra
+
+    def commit(self) -> None:
+        if self._trial is None:
+            return
+        # commit steel trial state first
+        if hasattr(self.section, "commit_trial"):
+            self.section.commit_trial()
+        self.th_comm = float(self._trial["th_new"])
+        self.M_comm = float(self._trial["M_new"])
+        self.a_comm = float(self._trial["a_new"])
+        self.eps0_comm = float(self._trial["eps0_new"])
+        self._trial = None
+
+
+@dataclass
+class FiberRotSpringElement:
+    """Zero-length rotational spring element backed by a FiberBeamHinge1D."""
+
+    ni: int
+    nj: int
+    hinge: FiberBeamHinge1D
+    nodes: List[Node]
+    kind: str = "beam_fiber"
+
+    _trial: Optional[Dict] = None
+
+    def dofs(self) -> np.ndarray:
+        ni = self.nodes[self.ni]
+        nj = self.nodes[self.nj]
+        return np.array(
+            [
+                ni.dof_u[0],
+                ni.dof_u[1],
+                ni.dof_th,
+                nj.dof_u[0],
+                nj.dof_u[1],
+                nj.dof_th,
+            ],
+            dtype=int,
+        )
+
+    def eval_trial(self, u_trial: np.ndarray, u_comm: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict]:
+        dofs = self.dofs()
+        th_i = float(u_trial[dofs[2]])
+        th_j = float(u_trial[dofs[5]])
+        th_i_c = float(u_comm[dofs[2]])
+        th_j_c = float(u_comm[dofs[5]])
+        dth_inc = (th_j - th_i) - (th_j_c - th_i_c)
+
+        M, kM, th_new, a_new, M_new, extra = self.hinge.eval_increment(dth_inc)
+
+        Bm = np.array([[0, 0, -1, 0, 0, 1]], float)
+        k_l = float(kM) * (Bm.T @ Bm)
+        f_l = (Bm.T * float(M)).reshape(6)
+
+        self._trial = {"th_new": th_new, "a_new": a_new, "M_new": M_new}
+        info = {"dtheta": float(dth_inc), "M": float(M), "a": float(a_new)}
+        info.update(extra)
+        return k_l, f_l, info
+
+    def commit(self) -> None:
+        self.hinge.commit()
+        self._trial = None
+
+    def reset_state(self) -> None:
+        self._trial = None
+        self.hinge.reset_state()
 
 
 @dataclass
