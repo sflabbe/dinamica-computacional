@@ -51,7 +51,7 @@ def _solve_deps_for_N_control(
     The hinge state is NOT modified during evaluations (commit=False).
 
     Notes
-    -----
+    ----
     Newton-type methods are fragile here because the polygonal return-mapping
     makes N(dε) non-smooth when the active face set changes.
     """
@@ -127,7 +127,7 @@ def _outputs_dir() -> Path:
     return out
 
 
-def _cycle_path(amplitude: float, steps_per_half: int = 40) -> np.ndarray:
+def _cycle_path(amplitude: float, steps_per_half: int = 400) -> np.ndarray:
     up = np.linspace(0.0, amplitude, steps_per_half, endpoint=False)
     down = np.linspace(amplitude, 0.0, steps_per_half, endpoint=False)
     neg = np.linspace(0.0, -amplitude, steps_per_half, endpoint=False)
