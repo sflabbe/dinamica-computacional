@@ -24,7 +24,7 @@ def _outputs_dir() -> Path:
     return out
 
 
-def _cycle_path(amplitude: float, steps_per_half: int = 400) -> np.ndarray:
+def _cycle_path(amplitude: float, steps_per_half: int = 40) -> np.ndarray:
     up = np.linspace(0.0, amplitude, steps_per_half, endpoint=False)
     down = np.linspace(amplitude, 0.0, steps_per_half, endpoint=False)
     neg = np.linspace(0.0, -amplitude, steps_per_half, endpoint=False)

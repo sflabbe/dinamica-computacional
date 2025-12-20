@@ -30,7 +30,7 @@ class PlasticHingeNM:
     s: np.ndarray = None        # 2,
     enable_substepping: bool = False
     substep_tol: float = 0.05
-    substep_max: int = 12
+    substep_max: int = 500
 
     def __post_init__(self):
         self.K = np.asarray(self.K, float).reshape(2,2)

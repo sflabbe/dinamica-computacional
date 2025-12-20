@@ -162,7 +162,7 @@ class FiberBeamHinge1D:
     Lp: float
     N_target: float = 0.0
     max_iter: int = 25
-    tol_N: float = 1e-2
+    tol_N: float = 1e3
     tol_eps0: float = 1e-10
 
     # committed state

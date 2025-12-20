@@ -136,8 +136,8 @@ def _history_from_cycles(amplitudes: Iterable[float], steps_per_half: int = 40) 
 
 
 def _build_histories() -> Dict[str, np.ndarray]:
-    eps_history = _history_from_cycles([2e-4, 4e-4, 6e-4], steps_per_half=400)
-    th_history = _history_from_cycles([0.002, 0.004, 0.006], steps_per_half=400)
+    eps_history = _history_from_cycles([2e-4, 4e-4, 6e-4], steps_per_half=50)
+    th_history = _history_from_cycles([0.002, 0.004, 0.006], steps_per_half=50)
 
     t = np.linspace(0.0, 6.0 * math.pi, 400)
     eps_comb = 2.5e-4 * np.sin(t)
