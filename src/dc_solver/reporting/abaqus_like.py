@@ -198,7 +198,7 @@ class DatWriter:
         self._file.write(
             f"ANALYSIS COMPLETE WITH {event.warnings_count} WARNING MESSAGES ON THE DAT FILE\n"
         )
-        self._file.write("JOB TIME SUMMARY\n")
+        self._file.write("\nJOB TIME SUMMARY\n")
         self._file.write(
             " CPU TIME (USER) = {user}s, CPU TIME (SYSTEM) = {sys}s, WALL CLOCK = {wall}s\n".format(
                 user=format_float(event.cpu_user_s),
@@ -206,6 +206,21 @@ class DatWriter:
                 wall=format_float(event.wall_s),
             )
         )
+
+        # Write JOB TOTALS section with FLOPs and other metrics
+        if event.totals:
+            self._file.write("\nJOB TOTALS\n")
+            for key, value in sorted(event.totals.items()):
+                # Format nicely depending on the metric
+                if "flops" in key.lower():
+                    self._file.write(f"  {key:20s} = {value:.6e}\n")
+                elif "gflop" in key.lower() or "rate" in key.lower():
+                    self._file.write(f"  {key:20s} = {format_float(value)}\n")
+                elif isinstance(value, int):
+                    self._file.write(f"  {key:20s} = {value}\n")
+                else:
+                    self._file.write(f"  {key:20s} = {format_float(value)}\n")
+
         self._file.flush()
 
     def close(self) -> None:

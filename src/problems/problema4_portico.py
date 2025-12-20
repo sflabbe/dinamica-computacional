@@ -528,7 +528,8 @@ def run_incremental_amplitudes(
     dt_hist = []
     last = None
 
-    for A_g in amps_g:
+    print(f"[problema4] Incremental dynamic analysis: {len(amps_g)} amplitudes, integrator={integrator}")
+    for idx, A_g in enumerate(amps_g):
         A = float(A_g) * g
         dt = base_dt
         while True:
@@ -561,13 +562,17 @@ def run_incremental_amplitudes(
                 break
             except RuntimeError:
                 if dt <= dt_min + 1e-15:
+                    print(f"  [{idx+1}/{len(amps_g)}] A_g={A_g:.2f} - COLLAPSE (dt<dtmin)")
                     meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
                     return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
                 dt *= 0.5
 
         pk = float(np.max(np.abs(out["drift"])))
         peak_drifts.append(pk)
+        pct = 100.0 * (idx + 1) / len(amps_g)
+        print(f"  [{idx+1}/{len(amps_g)}] ({pct:5.1f}%) A_g={A_g:.2f} drift_max={pk:.4f} dt={out['dt']:.5f} n_steps={len(out['t'])}")
         if pk >= drift_limit:
+            print(f"  DRIFT LIMIT REACHED: {pk:.4f} >= {drift_limit:.4f}")
             break
 
     meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
@@ -728,6 +733,7 @@ def main():
         _write_basic_plots(out, last)
         _write_summary(out, meta, amps_used, peak_drifts)
         _write_runinfo(out, meta, last)
+        print(f"\n[problema4] Analysis complete. Outputs in: {out}")
         return
 
     # compare mode
@@ -816,6 +822,11 @@ def main():
         dtf = dt_fib[i] if i < len(dt_fib) else float("nan")
         lines.append(f"{amps[i]:.3f},{y_shm[i]:.6f},{y_fib[i]:.6f},{dts:.6f},{dtf:.6f}")
     (out_cmp / "problem4_compare_summary.csv").write_text("\n".join(lines), encoding="utf-8")
+
+    print(f"\n[problema4] Comparison analysis complete.")
+    print(f"  SHM outputs:     {out_shm}")
+    print(f"  Fiber outputs:   {out_fib}")
+    print(f"  Compare outputs: {out_cmp}")
 
 
 if __name__ == "__main__":
