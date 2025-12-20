@@ -135,3 +135,98 @@ Desactivar JIT (por si estás debuggeando o si Numba no anda bien en tu platafor
   ```bash
   DC_USE_NUMBA=0 python -m problems.problema4_portico --integrator explicit
   ```
+
+---
+
+## Job Infrastructure & Reporting (Estilo Abaqus/CalculiX)
+
+El repo ahora incluye infraestructura profesional de "JOB" con reporting robusto, inspirado en Abaqus, CalculiX y SAP2000.
+
+### Características
+
+- **JobRunner context manager**: orquesta todo el ciclo de vida de un análisis
+- **Tracking de archivos**: detecta automáticamente todos los outputs generados
+- **Verbosidad estilo Abaqus**: bloques `JOB START` / `JOB END` con métricas
+- **Archivos de salida estándar**:
+  - `.msg` — mensajes, warnings, iteraciones
+  - `.sta` — status incremental (step/inc/time/dt)
+  - `.dat` — resumen final + **JOB TOTALS** (CPU, FLOPs, etc.)
+  - `journal.log` — log cronológico de eventos
+  - `*_runinfo.json` y `*_runinfo.txt` — metadata completa
+- **Serialización JSON-safe**: maneja automáticamente `np.ndarray`, `Path`, `datetime`, etc.
+- **Estimación de FLOPs**: métricas de performance (GFLOP/s estimado)
+- **Progress printing**: impresión incremental durante análisis largos
+
+### Estructura de Código
+
+```
+src/dc_solver/
+  job/
+    runner.py          # JobRunner (context manager principal)
+    file_tracker.py    # snapshot/diff de archivos
+    journal.py         # journal.log writer
+    console.py         # pretty printing (progress, headers)
+    flops.py           # estimación de FLOPs
+  reporting/
+    run_info.py        # runinfo txt/json + to_jsonable()
+    abaqus_like.py     # writers .msg/.sta/.dat
+    events.py          # event definitions
+  fem/                 # model, nodes, elements
+  integrators/         # hht_alpha, newmark, explicit
+  post/                # plotting, hinge_exports, fiber_mesh_plot
+  materials/           # elastic, etc.
+```
+
+### Ejemplo de Uso
+
+Ver: `examples/demo_job_infrastructure.py`
+
+```python
+from dc_solver.job import JobRunner, print_progress, should_print_progress
+
+with JobRunner(job_name="mi_analisis", output_dir="outputs/run1", meta={...}) as job:
+    # Configurar parámetros para estimación de FLOPs
+    job.set_analysis_params(ndof=300, n_steps=10000, integrator="explicit")
+
+    # Tu análisis aquí...
+    for i in range(n_steps):
+        # ... solve ...
+
+        # Imprimir progreso periódicamente
+        if should_print_progress(i, n_steps, print_every_pct=5.0):
+            print_progress(i, n_steps, t=t_current, dt=dt, drift_peak=drift_max)
+
+    # Marcar éxito
+    job.mark_success()
+```
+
+Al salir del contexto, se generan automáticamente:
+- `.msg`, `.sta`, `.dat`, `journal.log`
+- `mi_analisis_runinfo.json` / `.txt` (con lista de archivos creados)
+- Impresión de **JOB END** con tiempos, FLOPs, y lista de outputs
+
+### Ejecutar el Demo
+
+```bash
+python examples/demo_job_infrastructure.py
+```
+
+Outputs en: `outputs/demo_job/<timestamp>__explicit__sdof/`
+
+### Runinfo JSON-Safe
+
+La función `to_jsonable()` en `reporting/run_info.py` convierte automáticamente:
+
+- `np.ndarray` → `list`
+- `np.float64`, `np.int64` → `float`, `int`
+- `Path` → `str`
+- `datetime` / `date` → isoformat string
+- `set`, `tuple` → `list`
+- `dict` con keys no-string → keys convertidas a `str`
+
+Esto **elimina el error típico**:
+```
+TypeError: Object of type ndarray is not JSON serializable
+```
+
+**Todos** los problemas existentes (2, 3, 4, 5) ya usan `write_run_info()` internamente, que aplica `to_jsonable()` automáticamente.
