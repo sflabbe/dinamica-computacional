@@ -19,5 +19,10 @@ env/
 *.png
 *.pdf
 *.csv
+*.txt
+*.log
+*.xlsx
+*.zip
+*.tar.gz
 results/
 output/
