@@ -1,3 +1,0 @@
-dc_solver
-plastic_hinge
-problems
