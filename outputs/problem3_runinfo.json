@@ -1,0 +1,30 @@
+{
+  "job": "problem3_shm_verify",
+  "timestamp": "2025-12-20T19:47:16",
+  "cwd": "C:\\Users\\s.labbe\\dinamica-computacional",
+  "output_dir": "C:\\Users\\s.labbe\\dinamica-computacional\\outputs",
+  "python": "3.14.0",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "argv": [
+    "src/problems/problema3_shm_verify.py"
+  ],
+  "meta": {
+    "n_steps": 961,
+    "theta": {
+      "max": 0.008,
+      "min": -0.008
+    },
+    "hinge": {
+      "K0_0": 250000000.0,
+      "My_0": 300000.0,
+      "alpha_post": 0.02,
+      "cK": 1.8,
+      "cMy": 1.2,
+      "bw_beta": 0.7,
+      "bw_gamma": 0.3,
+      "bw_n": 2.0,
+      "pinch": 0.35,
+      "theta_pinch": 0.0015
+    }
+  }
+}

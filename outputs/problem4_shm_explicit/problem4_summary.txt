@@ -1,5 +1,5 @@
 Problem 4 summary
-beam_hinge=compare
+beam_hinge=shm
 integrator=explicit
 drift_limit=0.100
 snapshot_limit=0.040

@@ -34,6 +34,8 @@ from problems.problema2_secciones_nm import (
     make_section_S2,
 )
 
+from dc_solver.reporting.run_info import build_run_info, write_run_info
+
 
 def _solve_deps_for_N_control(
     hinge: PlasticHingeNM,
@@ -383,6 +385,22 @@ def main() -> None:
             f"max_violation={max_violation:.3e}",
         ]
         (out / f"problem2_interaction_{tag}_summary.txt").write_text("\n".join(summary), encoding="utf-8")
+
+    # Run-info export (single file for the whole Problem 2 execution)
+    histories = _build_histories()
+    info = build_run_info(
+        job="problem2_interaccion",
+        output_dir=str(out),
+        meta={
+            "sections": {
+                "S1": {"b_m": float(sec_s1.b), "h_m": float(sec_s1.h), "Ac_m2": float(sec_s1.Ac)},
+                "S2": {"b_m": float(sec_s2.b), "h_m": float(sec_s2.h), "Ac_m2": float(sec_s2.Ac)},
+            },
+            "interaction_polygon": {"n": 90, "symmetric_M": True, "symmetric_N": False},
+            "histories": {k: {"n_steps": int(v.shape[0])} for k, v in histories.items()},
+        },
+    )
+    write_run_info(out, base_name="problem2_runinfo", info=info)
 
 
 if __name__ == "__main__":

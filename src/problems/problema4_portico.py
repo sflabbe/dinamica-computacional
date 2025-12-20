@@ -42,6 +42,8 @@ from dc_solver.hinges.models import (
     moment_capacity_from_polygon,
 )
 from dc_solver.integrators import solve_dynamic
+from dc_solver.post.hinge_exports import export_problem4_hinges
+from dc_solver.reporting.run_info import build_run_info, write_run_info
 from dc_solver.post.hysteresis_gradient import add_time_gradient_line, add_colorbar
 from dc_solver.post.plotting import plot_structure_states
 
@@ -612,7 +614,8 @@ def plot_results(
         field="both",
     )
 
-    export_hinge_hysteresis_gradient(out, model, last, max_hinges=10)
+    # Full exports for dissertation figures (CSV + plots)
+    export_problem4_hinges(out, model, last)
 
 
 def main():
@@ -676,6 +679,33 @@ def main():
             lines.append(f"collapse_A_g={amps_used[-1]:.3f}")
         (out / "problem4_summary.txt").write_text("\n".join(lines), encoding="utf-8")
 
+    def _write_runinfo(out: Path, meta: Dict, last: Optional[Dict[str, np.ndarray]]) -> None:
+        ri_meta: Dict[str, object] = {
+            "problem": 4,
+            "integrator": str(args.integrator),
+            "beam_hinge": str(args.beam_hinge),
+            "nlgeom": bool(nlgeom),
+            "nseg": int(nseg),
+            "drift_limit": float(drift_limit),
+            "snapshot_limit": float(snapshot_limit),
+            "alpha": float(alpha),
+            "dt_hist": meta.get("dt_hist", []),
+            "amps_g_used": meta.get("amps_g_used", []),
+        }
+        if last is not None:
+            try:
+                ri_meta.update(
+                    {
+                        "dt": float(last.get("dt", float("nan"))),
+                        "n_steps": int(len(last.get("t", [])) - 1),
+                        "peak_drift": float(np.max(np.abs(last.get("drift", np.array([0.0]))))),
+                    }
+                )
+            except Exception:
+                pass
+        info = build_run_info(job="problem4_portico", output_dir=str(out), meta=ri_meta)
+        write_run_info(out, base_name="problem4_runinfo", info=info)
+
     if args.beam_hinge != "compare":
         out = _outputs_dir(f"problem4_{args.beam_hinge}_{args.integrator}")
         peak_drifts, amps_used, last, model, meta = run_incremental_amplitudes(
@@ -697,6 +727,7 @@ def main():
         plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out)
         _write_basic_plots(out, last)
         _write_summary(out, meta, amps_used, peak_drifts)
+        _write_runinfo(out, meta, last)
         return
 
     # compare mode
@@ -723,6 +754,7 @@ def main():
     plot_results(last_shm, model_shm, meta_shm, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out_shm)
     _write_basic_plots(out_shm, last_shm)
     _write_summary(out_shm, meta_shm, amps_shm, pd_shm)
+    _write_runinfo(out_shm, meta_shm, last_shm)
 
     pd_fib, amps_fib, last_fib, model_fib, meta_fib = run_incremental_amplitudes(
         integrator=args.integrator,
@@ -743,6 +775,7 @@ def main():
     plot_results(last_fib, model_fib, meta_fib, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out_fib)
     _write_basic_plots(out_fib, last_fib)
     _write_summary(out_fib, meta_fib, amps_fib, pd_fib)
+    _write_runinfo(out_fib, meta_fib, last_fib)
 
     # compare summary + overlay
     common_n = min(len(amps_shm), len(amps_fib))

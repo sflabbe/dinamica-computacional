@@ -15,6 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from dc_solver.hinges.models import SHMBeamHinge1D
+from dc_solver.reporting.run_info import build_run_info, write_run_info
 
 
 def _outputs_dir() -> Path:
@@ -128,6 +129,29 @@ def main() -> None:
     fig.tight_layout()
     fig.savefig(out / "problem3_shm_energy.png", dpi=160)
     plt.close(fig)
+
+    # Run-info export
+    info = build_run_info(
+        job="problem3_shm_verify",
+        output_dir=str(out),
+        meta={
+            "n_steps": int(steps),
+            "theta": {"max": float(np.max(theta_hist)), "min": float(np.min(theta_hist))},
+            "hinge": {
+                "K0_0": float(hinge.K0_0),
+                "My_0": float(hinge.My_0),
+                "alpha_post": float(hinge.alpha_post),
+                "cK": float(hinge.cK),
+                "cMy": float(hinge.cMy),
+                "bw_beta": float(hinge.bw_beta),
+                "bw_gamma": float(hinge.bw_gamma),
+                "bw_n": float(hinge.bw_n),
+                "pinch": float(hinge.pinch),
+                "theta_pinch": float(hinge.theta_pinch),
+            },
+        },
+    )
+    write_run_info(out, base_name="problem3_runinfo", info=info)
 
 
 if __name__ == "__main__":

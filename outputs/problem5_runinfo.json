@@ -1,0 +1,37 @@
+{
+  "job": "problem5_fiber_section_interaction",
+  "timestamp": "2025-12-20T19:49:23",
+  "cwd": "C:\\Users\\s.labbe\\dinamica-computacional",
+  "output_dir": "C:\\Users\\s.labbe\\dinamica-computacional\\outputs",
+  "python": "3.14.0",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "argv": [
+    "src/problems/problema5_fiber_section_interaction.py",
+    "--mode",
+    "all"
+  ],
+  "meta": {
+    "mode": "all",
+    "steps_per_half": 125,
+    "materials": {
+      "fc_Pa": 20000000.0,
+      "fy_Pa": 420000000.0
+    },
+    "column": {
+      "b_m": 0.4,
+      "h_m": 0.4,
+      "cover_m": 0.04,
+      "ny": 70,
+      "nz": 50,
+      "clustering": "cosine"
+    },
+    "beam": {
+      "b_m": 0.3,
+      "h_m": 0.5,
+      "cover_m": 0.04,
+      "ny": 70,
+      "nz": 50,
+      "clustering": "cosine"
+    }
+  }
+}

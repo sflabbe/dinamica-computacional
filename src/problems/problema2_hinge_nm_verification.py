@@ -34,6 +34,8 @@ from problems.problema2_secciones_nm import (
     make_section_S2,
 )
 
+from dc_solver.reporting.run_info import build_run_info, write_run_info
+
 
 def _solve_deps_for_N_control(
     hinge: PlasticHingeNM,
@@ -406,6 +408,18 @@ def main() -> None:
         )
 
     (out / "problem2_hinge_checks.txt").write_text("\n".join(lines), encoding="utf-8")
+
+    # Run-info export (single file for the whole Problem 2 verification harness)
+    info = build_run_info(
+        job="problem2_hinge_nm_verification",
+        output_dir=str(out),
+        meta={
+            "interaction_polygon": {"n": 90, "symmetric_M": True, "symmetric_N": False},
+            "histories": {k: {"n_steps": int(v.shape[0])} for k, v in histories.items()},
+            "n_results": int(len(results)),
+        },
+    )
+    write_run_info(out, base_name="problem2_runinfo", info=info)
 
 
 if __name__ == "__main__":

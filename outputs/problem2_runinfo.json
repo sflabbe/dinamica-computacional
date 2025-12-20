@@ -1,0 +1,41 @@
+{
+  "job": "problem2_interaccion",
+  "timestamp": "2025-12-20T19:47:14",
+  "cwd": "C:\\Users\\s.labbe\\dinamica-computacional",
+  "output_dir": "C:\\Users\\s.labbe\\dinamica-computacional\\outputs",
+  "python": "3.14.0",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "argv": [
+    "src/problems/problema2_interaccion.py"
+  ],
+  "meta": {
+    "sections": {
+      "S1": {
+        "b_m": 0.4,
+        "h_m": 0.6,
+        "Ac_m2": 0.24
+      },
+      "S2": {
+        "b_m": 0.25,
+        "h_m": 0.5,
+        "Ac_m2": 0.125
+      }
+    },
+    "interaction_polygon": {
+      "n": 90,
+      "symmetric_M": true,
+      "symmetric_N": false
+    },
+    "histories": {
+      "axial": {
+        "n_steps": 601
+      },
+      "flexion": {
+        "n_steps": 601
+      },
+      "combined": {
+        "n_steps": 400
+      }
+    }
+  }
+}

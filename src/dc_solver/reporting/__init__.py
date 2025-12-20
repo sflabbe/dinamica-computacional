@@ -13,6 +13,7 @@ from dc_solver.reporting.events import (
     StepStart,
     Warning,
 )
+from dc_solver.reporting.run_info import build_run_info, write_run_info
 
 __all__ = [
     "AbaqusLikeConfig",
@@ -27,4 +28,6 @@ __all__ = [
     "StepEnd",
     "StepStart",
     "Warning",
+    "build_run_info",
+    "write_run_info",
 ]

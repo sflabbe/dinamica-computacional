@@ -193,6 +193,8 @@ import csv
 from plastic_hinge import FiberSection2DStateful
 from dc_solver.hinges.models import FiberBeamHinge1D
 from dc_solver.post.hysteresis_gradient import add_time_gradient_line, add_colorbar
+from dc_solver.post.fiber_mesh_plot import plot_rect_fiber_mesh_connectivity
+from dc_solver.reporting.run_info import build_run_info, write_run_info
 
 
 DEFAULT_STEPS_PER_HALF = 125  # ~501 points per cycle (4*steps_per_half+1)
@@ -238,6 +240,7 @@ def run_fiber_tests(
     h_col: float,
     out: Path,
     steps_per_half: int = DEFAULT_STEPS_PER_HALF,
+    hull_col: NMSurfacePolygon | None = None,
 ) -> None:
     """Run 'Problem2/3-style' cyclic tests for fiber hinges/sections.
 
@@ -330,14 +333,24 @@ def run_fiber_tests(
         N2[i] = float(Ni)
         M2[i] = float(Mi)
 
+    # --- Column: N-M plot with time gradient + yield hull overlay (if provided) ---
     fig, ax = plt.subplots(figsize=(7, 5))
+    if hull_col is not None and getattr(hull_col, "vertices", None) is not None:
+        verts = np.vstack([hull_col.vertices, hull_col.vertices[0]])
+        ax.plot(verts[:, 0], verts[:, 1], "k-", lw=1.7, label="interaction hull")
+
     lc = add_time_gradient_line(ax, N2, M2, c=np.arange(t.size))
     add_colorbar(lc, ax, label="step")
     ax.set_xlabel("N [N]")
     ax.set_ylabel("M [N-m]")
     ax.grid(True, alpha=0.3)
+    if hull_col is not None:
+        ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
+    # Keep the old filename for backwards compatibility
     fig.savefig(out / "problem5_fiber_col_NM_gradient.png", dpi=180)
+    # New requested filename
+    fig.savefig(out / "problem5_fiber_col_NM_overlay_hull_gradient.png", dpi=180)
     plt.close(fig)
 
     _write_csv(
@@ -377,6 +390,7 @@ def main(argv=None) -> None:
     ]
     As_tot_col = sum(As for As, _, _ in rebar_layers_col)
 
+    ny_col, nz_col = 70, 50
     sec_col = build_rc_rect_fiber_section_2d(
         b=b_col,
         h=h_col,
@@ -385,8 +399,8 @@ def main(argv=None) -> None:
         fy=fy,
         eps_c0=0.002,
         eps_cu=0.0035,
-        ny=70,
-        nz=50,
+        ny=ny_col,
+        nz=nz_col,
         clustering="cosine",
         rebar_layers=rebar_layers_col,
     )
@@ -403,6 +417,7 @@ def main(argv=None) -> None:
     ]
     As_tot_beam = sum(As for As, _, _ in rebar_layers_beam)
 
+    ny_beam, nz_beam = 70, 50
     sec_beam = build_rc_rect_fiber_section_2d(
         b=b_beam,
         h=h_beam,
@@ -411,29 +426,33 @@ def main(argv=None) -> None:
         fy=fy,
         eps_c0=0.002,
         eps_cu=0.0035,
-        ny=70,
-        nz=50,
+        ny=ny_beam,
+        nz=nz_beam,
         clustering="cosine",
         rebar_layers=rebar_layers_beam,
     )
 
-    if args.mode in ("interaction", "all"):
-        pts = sample_interaction_curve(sec_col, h=h_col, As_tot=As_tot_col, fy=fy, eps_cu=0.0035, n=200)
-        pts = pts[np.isfinite(pts).all(axis=1)]
-        hull = NMSurfacePolygon.from_points(pts)
+    # Always compute a reference interaction hull (cheap) so tests can overlay it.
+    pts = sample_interaction_curve(sec_col, h=h_col, As_tot=As_tot_col, fy=fy, eps_cu=0.0035, n=200)
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    hull = NMSurfacePolygon.from_points(pts)
 
-        # Plot fiber mesh (quick sanity check)
-        fig, ax = plt.subplots(figsize=(5, 5))
-        ys = np.array([f.y for f in sec_col.fibers])
-        zs = np.array([f.z for f in sec_col.fibers])
-        ax.scatter(zs, ys, s=3, alpha=0.25)
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_xlabel("z [m]")
-        ax.set_ylabel("y [m] (from top)")
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(out / "problem5_fiber_mesh.png", dpi=170)
-        plt.close(fig)
+    # Plot fiber mesh connectivity (requested: lines between nodes)
+    plot_rect_fiber_mesh_connectivity(
+        out / "problem5_fiber_mesh_connectivity.png",
+        b=b_col,
+        h=h_col,
+        ny=ny_col,
+        nz=nz_col,
+        clustering="cosine",
+        y0=0.0,
+        z0=-0.5 * b_col,
+        title="Problem 5 — Fiber mesh connectivity (column)",
+        xlabel="z [m]",
+        ylabel="y [m] (from top)",
+    )
+
+    if args.mode in ("interaction", "all"):
 
         # Plot raw samples
         fig, ax = plt.subplots(figsize=(7, 5))
@@ -481,7 +500,22 @@ def main(argv=None) -> None:
             h_col=h_col,
             out=out,
             steps_per_half=int(args.steps_per_half),
+            hull_col=hull,
         )
+
+    # Run-info export
+    info = build_run_info(
+        job="problem5_fiber_section_interaction",
+        output_dir=str(out),
+        meta={
+            "mode": str(args.mode),
+            "steps_per_half": int(args.steps_per_half),
+            "materials": {"fc_Pa": float(fc), "fy_Pa": float(fy)},
+            "column": {"b_m": float(b_col), "h_m": float(h_col), "cover_m": float(cover_col), "ny": int(ny_col), "nz": int(nz_col), "clustering": "cosine"},
+            "beam": {"b_m": float(b_beam), "h_m": float(h_beam), "cover_m": float(cover_beam), "ny": int(ny_beam), "nz": int(nz_beam), "clustering": "cosine"},
+        },
+    )
+    write_run_info(out, base_name="problem5_runinfo", info=info)
 
 
 if __name__ == "__main__":
