@@ -1,12 +1,12 @@
 {
   "job": "problem3_shm_verify",
-  "timestamp": "2025-12-20T19:47:16",
-  "cwd": "C:\\Users\\s.labbe\\dinamica-computacional",
-  "output_dir": "C:\\Users\\s.labbe\\dinamica-computacional\\outputs",
-  "python": "3.14.0",
-  "platform": "Windows-11-10.0.26200-SP0",
+  "timestamp": "2025-12-21T11:13:47",
+  "cwd": "/home/sebastian/dinamica-computacional",
+  "output_dir": "/home/sebastian/dinamica-computacional/outputs",
+  "python": "3.13.5",
+  "platform": "Linux-6.1.0-41-amd64-x86_64-with-glibc2.36",
   "argv": [
-    "src/problems/problema3_shm_verify.py"
+    "/home/sebastian/dinamica-computacional/src/problems/run_all_problems_2_3_4.py"
   ],
   "meta": {
     "n_steps": 961,

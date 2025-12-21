@@ -1,14 +1,12 @@
 {
   "job": "problem5_fiber_section_interaction",
-  "timestamp": "2025-12-20T19:49:23",
-  "cwd": "C:\\Users\\s.labbe\\dinamica-computacional",
-  "output_dir": "C:\\Users\\s.labbe\\dinamica-computacional\\outputs",
-  "python": "3.14.0",
-  "platform": "Windows-11-10.0.26200-SP0",
+  "timestamp": "2025-12-21T11:14:03",
+  "cwd": "/home/sebastian/dinamica-computacional",
+  "output_dir": "/home/sebastian/dinamica-computacional/outputs",
+  "python": "3.13.5",
+  "platform": "Linux-6.1.0-41-amd64-x86_64-with-glibc2.36",
   "argv": [
-    "src/problems/problema5_fiber_section_interaction.py",
-    "--mode",
-    "all"
+    "/home/sebastian/dinamica-computacional/src/problems/run_all_problems_2_3_4.py"
   ],
   "meta": {
     "mode": "all",
