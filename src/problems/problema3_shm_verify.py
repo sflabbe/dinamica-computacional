@@ -82,8 +82,9 @@ def main() -> None:
         th = theta_hist[i]
         dth = th - th_prev if i > 0 else th
 
-        M_new, k_tan, th_new, a_new, M_comm = hinge.eval_increment(dth)
+        M_new, k_tan, th_new, z_new, a_new, M_comm = hinge.eval_increment(dth)
         hinge.th_comm = th_new
+        hinge.z_comm = z_new
         hinge.a_comm = a_new
         hinge.M_comm = M_comm
 

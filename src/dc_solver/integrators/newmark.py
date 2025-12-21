@@ -35,11 +35,28 @@ class NewmarkCoefficients:
         return cls(beta, gamma, a0, a1, dt)
 
 
-def _compute_drift(u: np.ndarray, node_indices: Tuple[int, int], height: float, model: Model) -> float:
-    """Calculates inter-story drift ratio."""
-    dof_1 = model.nodes[node_indices[0]].dof_u[0]
-    dof_2 = model.nodes[node_indices[1]].dof_u[0]
-    return 0.5 * (u[dof_1] + u[dof_2]) / height
+def _compute_drift(
+    u: np.ndarray,
+    roof_nodes: Tuple[int, int],
+    height: float,
+    model: Model,
+    base_nodes: Optional[Tuple[int, int]] = None,
+) -> float:
+    """Inter-story drift ratio = (roof_avg_ux - base_avg_ux) / height.
+
+    Using base_nodes makes the definition robust if support motion is introduced later.
+    """
+    ux_r1 = model.nodes[roof_nodes[0]].dof_u[0]
+    ux_r2 = model.nodes[roof_nodes[1]].dof_u[0]
+    roof = 0.5 * (u[ux_r1] + u[ux_r2])
+
+    base = 0.0
+    if base_nodes is not None:
+        ux_b1 = model.nodes[base_nodes[0]].dof_u[0]
+        ux_b2 = model.nodes[base_nodes[1]].dof_u[0]
+        base = 0.5 * (u[ux_b1] + u[ux_b2])
+
+    return float(roof - base) / float(height)
 
 
 def _solve_gravity_initialization(model: Model, nd: int, fd: np.ndarray) -> np.ndarray:
@@ -102,6 +119,8 @@ def newmark_beta_newton(
     # --- 1. Setup & Pre-calculation ---
     nd = model.ndof()
     fd = model.free_dofs()
+    fd_mask = np.zeros(nd, dtype=bool)
+    fd_mask[fd] = True
     nf = fd.size
     
     dt = float(t[1] - t[0])
@@ -115,8 +134,9 @@ def newmark_beta_newton(
 
     # Influence vector
     r = np.zeros(nd)
-    r[M_diag > 0.0] = 1.0
-
+    # Influence vector: horizontal ground acceleration only (ux DOFs)
+    for node in model.nodes:
+        r[node.dof_u[0]] = 1.0
     # History Arrays
     n_steps = t.size
     u_hist = np.zeros((n_steps, nd))
@@ -149,7 +169,7 @@ def newmark_beta_newton(
         p_dynamic = p0 - M_diag * r * ag[0]
         
         a_n = np.zeros(nd)
-        mass_mask = M_diag > 0.0
+        mass_mask = (M_diag > 0.0) & fd_mask
         numerator = p_dynamic[mass_mask] - Rint0[mass_mask] - C_diag[mass_mask] * v_n[mass_mask]
         a_n[mass_mask] = numerator / M_diag[mass_mask]
 
@@ -157,7 +177,7 @@ def newmark_beta_newton(
     u_hist[0] = u_n
     v_hist[0] = v_n
     a_hist[0] = a_n
-    drift_hist[0] = _compute_drift(u_n, drift_nodes, drift_height, model)
+    drift_hist[0] = _compute_drift(u_n, drift_nodes, drift_height, model, base_nodes)
     vb_hist[0] = model.base_shear(u_n, base_nodes=base_nodes)
 
     snapshot_idx: Optional[int] = None
@@ -252,7 +272,7 @@ def newmark_beta_newton(
         v_hist[n + 1] = v_n
         a_hist[n + 1] = a_n
         
-        current_drift = _compute_drift(u_n, drift_nodes, drift_height, model)
+        current_drift = _compute_drift(u_n, drift_nodes, drift_height, model, base_nodes)
         drift_hist[n + 1] = current_drift
         vb_hist[n + 1] = model.base_shear(u_n, base_nodes=base_nodes)
 
@@ -346,4 +366,3 @@ def _report_iteration(reporter, step_id, n, it, res_norm, res, fd, du):
             converged_force=False, converged_moment=False, note=None,
         )
     )
-

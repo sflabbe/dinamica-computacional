@@ -1,6 +1,0 @@
-Problem 5: Fiber section N-M interaction
-Column: b=0.400 m, h=0.400 m, cover=0.040 m
-Beam:   b=0.300 m, h=0.500 m, cover=0.040 m
-fc=20.0 MPa (C20/25 ref), fy=420.0 MPa (A420)
-As_tot_col=1608.5 mm^2, As_tot_beam=1206.4 mm^2
-n_points=402

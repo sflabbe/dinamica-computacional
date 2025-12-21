@@ -1,5 +1,0 @@
-Problem 4 summary
-drift_limit=0.100
-snapshot_limit=0.040
-alpha=-0.050
-A_g,peak_drift,dt

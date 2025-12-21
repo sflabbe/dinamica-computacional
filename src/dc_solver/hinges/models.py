@@ -99,10 +99,26 @@ class SHMBeamHinge1D:
     a_comm: float = 0.0
     M_comm: float = 0.0
 
+    def _eref(self) -> float:
+        """Reference hysteretic energy to keep degradation stable.
+
+        The original SHM sketch accumulated raw work (integral of M dtheta) in `a`.
+        With M in N·m and rotations O(1e-3..1e-2), raw work can be O(1e2..1e4)
+        within a few increments, making exp(-c*a) collapse stiffness/strength
+        almost instantly ("hinges like chewing gum").
+
+        We instead use a dimensionless work measure by dividing by:
+            E_ref = My_0 * theta_y,  theta_y = My_0 / K0_0.
+        """
+        K0 = float(max(self.K0_0, 1e-18))
+        My0 = float(max(self.My_0, 1e-18))
+        theta_y = My0 / K0
+        return float(max(My0 * theta_y, 1e-12))
+
     def _bw_rhs(self, z: float, sign_dth: float) -> float:
         return self.bw_A - self.bw_beta * sign_dth * abs(z) ** (self.bw_n - 1.0) * z - self.bw_gamma * abs(z) ** self.bw_n
 
-    def eval_increment(self, dth: float, nsub: int | None = None) -> Tuple[float, float, float, float, float]:
+    def eval_increment(self, dth: float, nsub: int | None = None) -> Tuple[float, float, float, float, float, float]:
         if nsub is None:
             nsub = max(1, int(np.ceil(abs(dth) / 2e-4)))
         dth_sub = dth / nsub
@@ -110,6 +126,8 @@ class SHMBeamHinge1D:
         z = self.z_comm
         a = self.a_comm
         M = self.M_comm
+
+        Eref = self._eref()
 
         for _ in range(nsub):
             th_new = th + dth_sub
@@ -129,15 +147,25 @@ class SHMBeamHinge1D:
             pinch_factor = 1.0 - self.pinch * math.exp(-abs(th_new) / max(self.theta_pinch, 1e-12))
             M_new = self.alpha_post * K0 * th_new + (1.0 - self.alpha_post) * My * z_new * pinch_factor
 
-            a += max(0.0, 0.5 * (M + M_new) * dth_sub)
+            # accumulate non-dimensional hysteretic work (always positive)
+            dW = 0.5 * (M + M_new) * dth_sub
+            a += abs(float(dW)) / Eref
             th = th_new
             z = max(-1.2, min(1.2, z_new))
             M = M_new
 
+        # Tangent stiffness (for Newton): use Bouc–Wen dz/dθ evaluated at the end
+        # of the increment, and keep it non-negative to avoid snap-back/negative
+        # tangents that can make the educational Newton solver very fragile.
         K0 = self.K0_0 * math.exp(-self.cK * a)
         My = self.My_0 * math.exp(-self.cMy * a)
-        k_tan = self.alpha_post * K0 + (1.0 - self.alpha_post) * My * (1.0 - self.pinch)
-        return M, k_tan, th, a, M
+        sign_tot = 1.0 if float(dth) >= 0.0 else -1.0
+        dz_dth = float(self._bw_rhs(float(z), sign_tot))
+        dz_dth = max(0.0, dz_dth)
+        pinch_factor_end = 1.0 - self.pinch * math.exp(-abs(float(th)) / max(self.theta_pinch, 1e-12))
+        k_tan = self.alpha_post * K0 + (1.0 - self.alpha_post) * My * dz_dth * pinch_factor_end
+        k_tan = float(max(k_tan, max(self.alpha_post * K0, 1e-12)))
+        return float(M), k_tan, float(th), float(z), float(a), float(M)
 
 
 @dataclass
@@ -405,9 +433,9 @@ class RotSpringElement:
             th_old = float(self.beam_hinge.th_comm)
             M_old = float(self.beam_hinge.M_comm)
 
-            M, kM, th_new, a_new, M_new = self.beam_hinge.eval_increment(dth_inc)
-            dW_pl = max(0.0, 0.5 * (M_old + M) * (th_new - th_old))
-            info_extra = {"a": float(a_old), "dW_pl": float(dW_pl)}
+            M, kM, th_new, z_new, a_new, M_new = self.beam_hinge.eval_increment(dth_inc)
+            dW_pl = abs(0.5 * (M_old + M) * (th_new - th_old))
+            info_extra = {"a": float(a_old), "z": float(z_new), "dW_pl": float(dW_pl)}
             th_next = th_new
         else:
             raise ValueError("Unknown hinge kind")
@@ -418,6 +446,7 @@ class RotSpringElement:
 
         self._trial = {
             "th_p_new": th_next,
+            "z_new": float(z_new) if self.kind == "beam_shm" else None,
             "a_new": a_new,
             "M_new": M_new,
         }
@@ -436,8 +465,14 @@ class RotSpringElement:
         elif self.kind == "beam_shm":
             assert self.beam_hinge is not None
             self.beam_hinge.th_comm = self._trial["th_p_new"]
+            # Keep Bouc–Wen internal variable consistent between increments.
+            if self._trial.get("z_new") is not None:
+                self.beam_hinge.z_comm = float(self._trial["z_new"])
             self.beam_hinge.a_comm = self._trial["a_new"]
             self.beam_hinge.M_comm = self._trial["M_new"]
+
+        # clear trial after successful commit
+        self._trial = None
 
     def reset_state(self) -> None:
         self._trial = None
@@ -449,6 +484,7 @@ class RotSpringElement:
         elif self.kind == "beam_shm":
             assert self.beam_hinge is not None
             self.beam_hinge.th_comm = 0.0
+            self.beam_hinge.z_comm = 0.0
             self.beam_hinge.a_comm = 0.0
             self.beam_hinge.M_comm = 0.0
 

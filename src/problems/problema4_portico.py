@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dc_solver.utils.gravity import solve_gravity_only
 
 import math
 from pathlib import Path
@@ -142,6 +143,48 @@ def _rebar_area(phi_m: float) -> float:
     return math.pi * (phi_m / 2.0) ** 2
 
 
+def distribute_lumped_mass_from_beams(
+    *,
+    nodes: List[Node],
+    beams: List[FrameElementLinear2D],
+    mass: np.ndarray,
+    M_total: float,
+    include_rot_inertia: bool = True,
+) -> None:
+    """Distribute a target total physical mass along all frame members.
+
+    The solver uses a diagonal (lumped) mass vector. We approximate a consistent
+    member mass by lumping half of each element's mass to each end node.
+
+    - Translational mass is assigned to BOTH ux and uy DOFs at each node.
+    - Optional rotational inertia is assigned to theta DOFs using a simple beam-like
+      estimate per element end: I_end ≈ (m' * L^3) / 24, with m' = M_total / sum(L).
+    """
+    total_L = sum(float(e._geom()[0]) for e in beams)
+    if total_L <= 0.0:
+        return
+    if M_total <= 0.0:
+        return
+
+    m_per_L = float(M_total) / float(total_L)
+
+    for e in beams:
+        L_e = float(e._geom()[0])
+        if not np.isfinite(L_e) or L_e <= 0.0:
+            continue
+
+        m_end = 0.5 * m_per_L * L_e  # kg
+        for n_id in (int(e.ni), int(e.nj)):
+            ux, uy = nodes[n_id].dof_u
+            mass[ux] += m_end
+            mass[uy] += m_end
+            if include_rot_inertia:
+                th = nodes[n_id].dof_th
+                I_end = m_per_L * (L_e ** 3) / 24.0  # kg*m^2
+                mass[th] += I_end
+
+
+
 def build_portal_beam_hinge(
     H: float = 3.0,
     L: float = 5.0,
@@ -151,8 +194,10 @@ def build_portal_beam_hinge(
     nseg: int = 6,
     cover: float = 0.05,
     nlgeom: bool = False,
-    explicit_mass_dt: Optional[float] = None,
     beam_hinge: str = "shm",  # "shm" | "fiber"
+    mass_mode: str = "distributed",  # "roof" | "distributed"
+    include_rot_inertia: bool = True,
+    explicit_mass_dt: Optional[float] = None,
 ) -> Tuple[Model, Dict]:
     dm = DofManager()
 
@@ -206,6 +251,36 @@ def build_portal_beam_hinge(
 
     E = 30e9
 
+
+
+    # --- Plastic hinge lengths (macro-element end zones) ---
+    # Literature practice (e.g., Cáceres / De la Llera): Lp is of order section depth.
+    Lp_col = float(min(b_col, h_col))
+    Lp_beam = float(min(b_beam, h_beam))
+
+    # --- Option 1 (common): shortened elastic member (rigid end zones / end offsets) ---
+    # Keep geometric length for kinematics and loading, but scale A and I of the elastic segments so that
+    # EA/L and EI/L^3 match an effective elastic length Le = L_full - (Lp_i + Lp_j).
+    def _scale_props_for_shortened_elastic(A: float, I: float, L_full: float, Lp_i: float, Lp_j: float) -> tuple[float, float, float, float]:
+        Le = float(L_full) - float(Lp_i) - float(Lp_j)
+        Le = max(Le, 1e-9)
+        s = float(L_full) / Le
+        A_eff = float(A) * s
+        I_eff = float(I) * (s ** 3)
+        return A_eff, I_eff, Le, s
+
+    # Column: hinge zone at base only -> Le = H - Lp_col
+    A_col_eff, I_col_eff, Le_col, s_col = _scale_props_for_shortened_elastic(A_col, I_col, H, Lp_col, 0.0)
+    # Beam: hinge zones at both ends -> Le = L - 2*Lp_beam
+    A_beam_eff, I_beam_eff, Le_beam, s_beam = _scale_props_for_shortened_elastic(A_beam, I_beam, L, Lp_beam, Lp_beam)
+
+    # Initial elastic rotational stiffness of beam hinges (Cáceres: kθ = 2EI/Lp)
+    k_beam0 = 2.0 * E * I_beam / Lp_beam
+
+    # Column hinge local elastic stiffnesses (Cáceres: kδ = EA/Lp, kθ = 2EI/Lp)
+    KN_col = E * A_col / Lp_col
+    KM_col = 2.0 * E * I_col / Lp_col
+
     nseg_use = int(nseg)
     # IMPORTANT: columns connect to the *joint* nodes (2,3) so joint rotations are shared.
     # Only the beam end is decoupled via the rotational spring (2 -> i2B and 3 -> i3B).
@@ -222,16 +297,9 @@ def build_portal_beam_hinge(
             elem_ids.append(len(beams) - 1)
         return elem_ids
 
-    left_elems = add_member(left_nodes, A_col, I_col)
-    right_elems = add_member(right_nodes, A_col, I_col)
-    beam_elems = add_member(beam_nodes, A_beam, I_beam)
-
-    Lp_col = 0.5 * h_col
-    k_col0 = 6.0 * E * I_col / H
-    k_beam0 = 6.0 * E * I_beam / L
-    KN_col = E * A_col / Lp_col
-    KM_col = E * I_col / Lp_col
-
+    left_elems = add_member(left_nodes, A_col_eff, I_col_eff)
+    right_elems = add_member(right_nodes, A_col_eff, I_col_eff)
+    beam_elems = add_member(beam_nodes, A_beam_eff, I_beam_eff)
     hinges: List[RotSpringElement | FiberRotSpringElement | HingeNM2DElement] = []
     hinge_left = ColumnHingeNM2D(
         hinge=PlasticHingeNM(surface=surf_col, K=np.diag([KN_col, KM_col]), enable_substepping=True),
@@ -244,32 +312,8 @@ def build_portal_beam_hinge(
 
     beam_hinge = str(beam_hinge).lower().strip()
     if beam_hinge == "shm":
-        # SHM hinge with stiffness/strength degradation and pinching.
-        # Parameters follow the verification setup in Problema 3 (order-of-magnitude).
-        shm_left = SHMBeamHinge1D(
-            K0_0=k_beam0,
-            My_0=My_beam,
-            alpha_post=0.02,
-            cK=1.8,
-            cMy=1.2,
-            bw_beta=0.7,
-            bw_gamma=0.3,
-            bw_n=2.0,
-            pinch=0.35,
-            theta_pinch=0.0015,
-        )
-        shm_right = SHMBeamHinge1D(
-            K0_0=k_beam0,
-            My_0=My_beam,
-            alpha_post=0.02,
-            cK=1.8,
-            cMy=1.2,
-            bw_beta=0.7,
-            bw_gamma=0.3,
-            bw_n=2.0,
-            pinch=0.35,
-            theta_pinch=0.0015,
-        )
+        shm_left = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
+        shm_right = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
         hinges.append(RotSpringElement(2, i2B, "beam_shm", None, shm_left, nodes))
         hinges.append(RotSpringElement(3, i3B, "beam_shm", None, shm_right, nodes))
     elif beam_hinge == "fiber":
@@ -305,8 +349,7 @@ def build_portal_beam_hinge(
                 (2 * _rebar_area(phi20), h_beam - cover, 2),
             ],
         )
-
-        Lp_beam = 0.5 * h_beam
+        # Use the same Lp_beam defined above (macro-element hinge length)
         fiber_left = FiberBeamHinge1D(section=beam_sec, Lp=Lp_beam, N_target=0.0)
         fiber_right = FiberBeamHinge1D(section=beam_sec_R, Lp=Lp_beam, N_target=0.0)
         hinges.append(FiberRotSpringElement(2, i2B, fiber_left, nodes))
@@ -349,14 +392,24 @@ def build_portal_beam_hinge(
     omega0 = 2.0 * math.pi / T0
     M_total = K_story / (omega0 ** 2)
 
-    mass[nodes[2].dof_u[0]] = 0.5 * M_total
-    mass[nodes[3].dof_u[0]] = 0.5 * M_total
+    mass_mode = str(mass_mode).lower().strip()
+    if mass_mode == "roof":
+        # Classic SDOF-style roof lumping (horizontal only)
+        mass[nodes[2].dof_u[0]] = 0.5 * M_total
+        mass[nodes[3].dof_u[0]] = 0.5 * M_total
+    elif mass_mode == "distributed":
+        # Distribute the same total physical mass along all members and to all DOFs.
+        distribute_lumped_mass_from_beams(
+            nodes=nodes,
+            beams=beams,
+            mass=mass,
+            M_total=M_total,
+            include_rot_inertia=bool(include_rot_inertia),
+        )
+    else:
+        raise ValueError(f"Unknown mass_mode: {mass_mode!r} (use 'roof' or 'distributed')")
 
-    # Explicit integration requires positive mass for all free DOFs.
-    # For the portal frame we normally lump mass only in the horizontal DOFs of the top nodes.
-    # If `explicit_mass_dt` is provided we add minimum translational masses / rotational inertias
-    # based on the linear stiffness diagonal to (a) avoid a singular mass matrix and (b) keep
-    # the explicit stability limit in a reasonable range (targeted around `explicit_mass_dt`).
+    # Optional explicit helper: ensure strictly positive inertia/mass on all free DOFs.
     if explicit_mass_dt is not None:
         dt_target = float(explicit_mass_dt)
         u0 = np.zeros(nd)
@@ -369,11 +422,28 @@ def build_portal_beam_hinge(
         m_fd = np.maximum(m_fd, m_req)
         m_fd = np.maximum(m_fd, 1e-12)  # strictly positive
         mass[fd] = m_fd
+
+
     C[:] = 2.0 * zeta * omega0 * mass
+
+    # Mass bookkeeping (unique DOF indices; auxiliary nodes may share translations)
+    ux_dofs = np.unique(np.array([n.dof_u[0] for n in nodes], dtype=int))
+    uy_dofs = np.unique(np.array([n.dof_u[1] for n in nodes], dtype=int))
+    th_dofs = np.unique(np.array([n.dof_th for n in nodes], dtype=int))
+    mass_ux_total = float(np.sum(mass[ux_dofs]))
+    mass_uy_total = float(np.sum(mass[uy_dofs]))
+    inertia_th_total = float(np.sum(mass[th_dofs]))
+
 
     meta = {
         "K_story": K_story,
         "M_total": M_total,
+        "mass_mode": str(mass_mode),
+        "include_rot_inertia": bool(include_rot_inertia),
+        "explicit_mass_dt": explicit_mass_dt,
+        "mass_ux_total": mass_ux_total,
+        "mass_uy_total": mass_uy_total,
+        "inertia_th_total": inertia_th_total,
         "T0": T0,
         "omega0": omega0,
         "section_col": sec_col,
@@ -381,11 +451,20 @@ def build_portal_beam_hinge(
         "section_beam": sec_beam,
         "surface_beam": surf_beam,
         "My_beam": My_beam,
+        "Lp_col": Lp_col,
+        "Lp_beam": Lp_beam,
+        "Le_col": Le_col,
+        "Le_beam": Le_beam,
+        "s_col": s_col,
+        "s_beam": s_beam,
+        "A_col_eff": A_col_eff,
+        "I_col_eff": I_col_eff,
+        "A_beam_eff": A_beam_eff,
+        "I_beam_eff": I_beam_eff,
         "H": H,
         "L": L,
         "nseg": nseg_use,
         "member_elements": {"left": left_elems, "right": right_elems, "beam": beam_elems},
-        "explicit_mass_dt": explicit_mass_dt,
     }
     return model, meta
 
@@ -565,27 +644,8 @@ def run_incremental_amplitudes(
         nseg=nseg,
         cover=cover,
         nlgeom=nlgeom,
-        explicit_mass_dt=(dt_min if str(integrator).lower().strip() == "explicit" else None),
         beam_hinge=beam_hinge,
     )
-
-
-    # For explicit scheme, estimate a conservative stability time step from the linearized stiffness.
-    dt_crit_est = None
-    if str(integrator).lower().strip() == "explicit":
-        try:
-            nd = model.ndof()
-            u0 = np.zeros(nd)
-            model.update_column_yields(u0)
-            K0, _, _ = model.assemble(u0, u0)
-            fd = model.free_dofs()
-            Mfd = np.maximum(model.mass_diag[fd], 1e-12)
-            kdiag = np.maximum(np.diag(K0), 0.0)
-            omega_max = float(np.sqrt(np.max(kdiag / Mfd))) if kdiag.size else 0.0
-            if omega_max > 0.0:
-                dt_crit_est = 2.0 / omega_max
-        except Exception:
-            dt_crit_est = None
 
     peak_drifts = []
     dt_hist = []
@@ -594,9 +654,7 @@ def run_incremental_amplitudes(
     print(f"[problema4] Incremental dynamic analysis: {len(amps_g)} amplitudes, integrator={integrator}")
     for idx, A_g in enumerate(amps_g):
         A = float(A_g) * g
-        dt = float(base_dt)
-        if dt_crit_est is not None:
-            dt = min(dt, 0.95 * float(dt_crit_est))
+        dt = base_dt
         while True:
             t = make_time(t_end, dt)
             ag = ag_fun(t, A)
@@ -688,9 +746,73 @@ def plot_results(
     export_problem4_hinges(out, model, last)
 
 
+
+
+# -------------------------------------------------------------------------
+# Optional reference: build + solve Problema 6 (elastic) for gravity comparison
+# This helper is intentionally defensive: if Problema 6 is unavailable, it
+# returns None and the caller should skip the comparison.
+def _try_build_problem6_reference(nseg: int, nlgeom: bool):
+    try:
+        import importlib
+        import inspect
+        from dc_solver.utils.gravity import solve_gravity_only
+
+        mod = importlib.import_module("problems.problema6_portico_elastico")
+
+        # Find a reasonable "builder" function in Problema 6
+        builder = None
+        for name in (
+            "build_problem6_model",
+            "build_portal_elastic",
+            "build_portal_elastic_model",
+            "build_portal_model",
+            "build_model",
+        ):
+            if hasattr(mod, name):
+                builder = getattr(mod, name)
+                break
+
+        if builder is None:
+            # Fallback: if the module exposes a 'make_model' helper
+            if hasattr(mod, "make_model"):
+                builder = getattr(mod, "make_model")
+            else:
+                return None
+
+        sig = inspect.signature(builder)
+        kwargs = {}
+        if "nseg" in sig.parameters:
+            kwargs["nseg"] = int(nseg)
+        elif "n_seg" in sig.parameters:
+            kwargs["n_seg"] = int(nseg)
+
+        if "nlgeom" in sig.parameters:
+            kwargs["nlgeom"] = bool(nlgeom)
+        elif "nonlinear_geometry" in sig.parameters:
+            kwargs["nonlinear_geometry"] = bool(nlgeom)
+
+        out = builder(**kwargs)
+        if isinstance(out, tuple) and len(out) >= 1:
+            model6 = out[0]
+            meta6 = out[1] if len(out) > 1 else {}
+        else:
+            model6 = out
+            meta6 = {}
+
+        res6 = solve_gravity_only(model6)
+        if isinstance(res6, dict):
+            res6["model"] = model6
+        res6["meta"] = meta6
+        return res6
+    except Exception:
+        return None
+# -------------------------------------------------------------------------
+
 def main():
 
     parser = argparse.ArgumentParser(description="Problema 4: pórtico con rótulas (time-history).")
+    parser.add_argument("--state", default="ida", choices=["ida", "gravity"], help="Run mode: ida (incremental dynamic analysis) or gravity (static gravity only).")
     parser.add_argument("--integrator", default="hht", choices=["hht", "newmark", "explicit"], help="Time integrator.")
     parser.add_argument("--nlgeom", action="store_true", help="Enable geometric nonlinearity (P-Delta).")
     parser.add_argument("--nseg", type=int, default=6, help="Segments per member (visualization/mesh).")
@@ -701,6 +823,55 @@ def main():
         help="Beam end hinge model: 'shm', 'fiber', or 'compare' (runs both).",
     )
     args = parser.parse_args()
+
+    # --- State selector ---------------------------------------------------------
+    if args.state == "gravity":
+        out_dir = _outputs_dir(f"problem4_{args.beam_hinge}_gravity")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build Problem 4 model (with hinges) and solve static gravity equilibrium.
+        # NOTE: this repo already provides `build_portal_beam_hinge(...)` as the
+        # canonical builder for Problema 4.
+        model4, _meta4 = build_portal_beam_hinge(
+            nseg=int(args.nseg),
+            nlgeom=bool(args.nlgeom),
+            beam_hinge=args.beam_hinge,
+            # Use distributed mass by default for consistency with dynamic runs
+            mass_mode="distributed",
+        )
+        r4 = solve_gravity_only(model4)
+
+        # Try to build Problem 6 elastic reference (if available in this repo)
+        r6 = _try_build_problem6_reference(nseg=int(args.nseg), nlgeom=bool(args.nlgeom))
+
+        txt = []
+        txt.append("Problem 4 gravity-only (with hinges)\n")
+        ux4 = float(r4.get("ux_roof", float("nan")))
+        uy4 = float(r4.get("uy_roof", float("nan")))
+        dr4 = float(r4.get("drift", float("nan")))
+        vb4 = float(r4.get("Vb", float("nan")))
+        txt.append(f"ux_roof={ux4:.6e} uy_roof={uy4:.6e} drift={dr4:.6e}\n")
+        txt.append(f"Vb={vb4:.6e}\n\n")
+
+        if r6 is not None:
+            txt.append("Problem 6 gravity-only (elastic reference)\n")
+            ux6 = float(r6.get("ux_roof", float("nan")))
+            uy6 = float(r6.get("uy_roof", float("nan")))
+            dr6 = float(r6.get("drift", float("nan")))
+            vb6 = float(r6.get("Vb", float("nan")))
+            txt.append(f"ux_roof={ux6:.6e} uy_roof={uy6:.6e} drift={dr6:.6e}\n")
+            txt.append(f"Vb={vb6:.6e}\n\n")
+            txt.append("Delta (P4 - P6)\n")
+            txt.append(f"dUx={(ux4-ux6):.6e} dUy={(uy4-uy6):.6e}\n")
+        else:
+            txt.append("Problem 6 reference not available (import failed).\n")
+
+        out_dir.joinpath("gravity_compare.txt").write_text("".join(txt), encoding="utf-8")
+        print("".join(txt))
+        print(f"[problema4] Gravity-only outputs in: {out_dir.resolve()}")
+        return
+
+
 
     drift_limit = 0.10
     snapshot_limit = 0.04
