@@ -113,7 +113,10 @@ def explicit_verlet(
 
     # Influence vector
     r = np.zeros(nd)
-    r[M_diag > 0.0] = 1.0
+    # Influence vector for horizontal ground acceleration: apply only to ux DOFs.
+    # (Do NOT couple excitation to uy or rotational DOFs even if they carry a numerical mass.)
+    for node in model.nodes:
+        r[node.dof_u[0]] = 1.0
 
     # History Arrays
     n_steps = t.size

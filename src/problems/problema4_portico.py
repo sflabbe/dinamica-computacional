@@ -151,6 +151,7 @@ def build_portal_beam_hinge(
     nseg: int = 6,
     cover: float = 0.05,
     nlgeom: bool = False,
+    explicit_mass_dt: Optional[float] = None,
     beam_hinge: str = "shm",  # "shm" | "fiber"
 ) -> Tuple[Model, Dict]:
     dm = DofManager()
@@ -243,8 +244,32 @@ def build_portal_beam_hinge(
 
     beam_hinge = str(beam_hinge).lower().strip()
     if beam_hinge == "shm":
-        shm_left = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
-        shm_right = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
+        # SHM hinge with stiffness/strength degradation and pinching.
+        # Parameters follow the verification setup in Problema 3 (order-of-magnitude).
+        shm_left = SHMBeamHinge1D(
+            K0_0=k_beam0,
+            My_0=My_beam,
+            alpha_post=0.02,
+            cK=1.8,
+            cMy=1.2,
+            bw_beta=0.7,
+            bw_gamma=0.3,
+            bw_n=2.0,
+            pinch=0.35,
+            theta_pinch=0.0015,
+        )
+        shm_right = SHMBeamHinge1D(
+            K0_0=k_beam0,
+            My_0=My_beam,
+            alpha_post=0.02,
+            cK=1.8,
+            cMy=1.2,
+            bw_beta=0.7,
+            bw_gamma=0.3,
+            bw_n=2.0,
+            pinch=0.35,
+            theta_pinch=0.0015,
+        )
         hinges.append(RotSpringElement(2, i2B, "beam_shm", None, shm_left, nodes))
         hinges.append(RotSpringElement(3, i3B, "beam_shm", None, shm_right, nodes))
     elif beam_hinge == "fiber":
@@ -326,6 +351,24 @@ def build_portal_beam_hinge(
 
     mass[nodes[2].dof_u[0]] = 0.5 * M_total
     mass[nodes[3].dof_u[0]] = 0.5 * M_total
+
+    # Explicit integration requires positive mass for all free DOFs.
+    # For the portal frame we normally lump mass only in the horizontal DOFs of the top nodes.
+    # If `explicit_mass_dt` is provided we add minimum translational masses / rotational inertias
+    # based on the linear stiffness diagonal to (a) avoid a singular mass matrix and (b) keep
+    # the explicit stability limit in a reasonable range (targeted around `explicit_mass_dt`).
+    if explicit_mass_dt is not None:
+        dt_target = float(explicit_mass_dt)
+        u0 = np.zeros(nd)
+        model.update_column_yields(u0)
+        K0, _, _ = model.assemble(u0, u0)  # reduced to free DOFs
+        fd = model.free_dofs()
+        kdiag = np.maximum(np.diag(K0), 0.0)
+        m_req = kdiag * (0.5 * dt_target) ** 2
+        m_fd = mass[fd]
+        m_fd = np.maximum(m_fd, m_req)
+        m_fd = np.maximum(m_fd, 1e-12)  # strictly positive
+        mass[fd] = m_fd
     C[:] = 2.0 * zeta * omega0 * mass
 
     meta = {
@@ -342,6 +385,7 @@ def build_portal_beam_hinge(
         "L": L,
         "nseg": nseg_use,
         "member_elements": {"left": left_elems, "right": right_elems, "beam": beam_elems},
+        "explicit_mass_dt": explicit_mass_dt,
     }
     return model, meta
 
@@ -521,8 +565,27 @@ def run_incremental_amplitudes(
         nseg=nseg,
         cover=cover,
         nlgeom=nlgeom,
+        explicit_mass_dt=(dt_min if str(integrator).lower().strip() == "explicit" else None),
         beam_hinge=beam_hinge,
     )
+
+
+    # For explicit scheme, estimate a conservative stability time step from the linearized stiffness.
+    dt_crit_est = None
+    if str(integrator).lower().strip() == "explicit":
+        try:
+            nd = model.ndof()
+            u0 = np.zeros(nd)
+            model.update_column_yields(u0)
+            K0, _, _ = model.assemble(u0, u0)
+            fd = model.free_dofs()
+            Mfd = np.maximum(model.mass_diag[fd], 1e-12)
+            kdiag = np.maximum(np.diag(K0), 0.0)
+            omega_max = float(np.sqrt(np.max(kdiag / Mfd))) if kdiag.size else 0.0
+            if omega_max > 0.0:
+                dt_crit_est = 2.0 / omega_max
+        except Exception:
+            dt_crit_est = None
 
     peak_drifts = []
     dt_hist = []
@@ -531,7 +594,9 @@ def run_incremental_amplitudes(
     print(f"[problema4] Incremental dynamic analysis: {len(amps_g)} amplitudes, integrator={integrator}")
     for idx, A_g in enumerate(amps_g):
         A = float(A_g) * g
-        dt = base_dt
+        dt = float(base_dt)
+        if dt_crit_est is not None:
+            dt = min(dt, 0.95 * float(dt_crit_est))
         while True:
             t = make_time(t_end, dt)
             ag = ag_fun(t, A)
