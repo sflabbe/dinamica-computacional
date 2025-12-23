@@ -187,6 +187,20 @@ def explicit_verlet(
     iters_hist = np.zeros(n_steps - 1, dtype=int) # Always 0 for explicit
     hinge_hist = []
 
+    # --- Energy balance accumulators (cumulative works + kinetic) ---
+    T_hist = np.zeros(n_steps)
+    Wext_hist = np.zeros(n_steps)
+    Wint_hist = np.zeros(n_steps)
+    Wdamp_hist = np.zeros(n_steps)
+    Wpl_hist = np.zeros(n_steps)
+    res_hist = np.zeros(n_steps)
+    p_prev = None  # type: ignore
+    R_prev = None  # type: ignore
+    v_prev = None  # type: ignore
+    Rint_final = None  # type: ignore
+
+
+
     if load_hist is None:
         load_hist = np.zeros((n_steps, nd))
 
@@ -233,6 +247,18 @@ def explicit_verlet(
     drift_hist[0] = _compute_drift(u_n, drift_nodes, drift_height, model, base_nodes)
     vb_hist[0] = model.base_shear(u_n, base_nodes=base_nodes)
 
+    # Energy balance init at step 0 (free DOFs only)
+    try:
+        model.update_column_yields(u_n)
+        _, R0, _ = model.assemble(u_n, u_n)
+        p0 = p_const + load_hist[0] - M_diag * r * ag[0]
+        T_hist[0] = 0.5 * float(np.sum(M_diag[fd] * (v_n[fd] ** 2)))
+        p_prev = p0[fd].copy()
+        R_prev = R0.copy()
+        v_prev = v_n[fd].copy()
+    except Exception:
+        pass
+
     snapshot_idx: Optional[int] = None
     
     # --- 3. Time Stepping Loop ---
@@ -262,6 +288,8 @@ def explicit_verlet(
 
             # --- B. Internal Force Evaluation ---
             _, Rint_f, inf_last = model.assemble(u_np1, u_n)
+            Rint_final = Rint_f
+
             Rint_np1 = np.zeros(nd)
             Rint_np1[fd] = Rint_f
 
@@ -283,6 +311,43 @@ def explicit_verlet(
         u_hist[n + 1] = u_n
         v_hist[n + 1] = v_n
         a_hist[n + 1] = a_n
+
+        # Energy balance update
+        try:
+            du = (u_hist[n + 1][fd] - u_hist[n][fd])
+            p_curr = (p_const + load_hist[n + 1] - M_diag * r * ag[n + 1])[fd]
+            R_curr = Rint_final
+            if p_prev is None:
+                p_prev = (p_const + load_hist[n] - M_diag * r * ag[n])[fd]
+            if R_prev is None:
+                _, R_prev0, _ = model.assemble(u_hist[n], u_hist[n])
+                R_prev = R_prev0
+            if v_prev is None:
+                v_prev = v_hist[n][fd]
+            dWext = 0.5 * float(np.dot((p_prev + p_curr), du))
+            dWint = 0.5 * float(np.dot((R_prev + R_curr), du))
+            pow_d0 = float(np.sum(C_diag[fd] * (v_prev ** 2)))
+            v_curr = v_hist[n + 1][fd]
+            pow_d1 = float(np.sum(C_diag[fd] * (v_curr ** 2)))
+            dWd = 0.5 * (pow_d0 + pow_d1) * float(dt)
+            Wext_hist[n + 1] = Wext_hist[n] + dWext
+            Wint_hist[n + 1] = Wint_hist[n] + dWint
+            Wdamp_hist[n + 1] = Wdamp_hist[n] + dWd
+            dWpl = 0.0
+            if isinstance(inf_last, dict) and isinstance(inf_last.get('hinges', None), list):
+                for hh in inf_last.get('hinges', []):
+                    try:
+                        dWpl += float(hh.get('dW_pl', 0.0))
+                    except Exception:
+                        pass
+            Wpl_hist[n + 1] = Wpl_hist[n] + float(dWpl)
+            T_hist[n + 1] = 0.5 * float(np.sum(M_diag[fd] * (v_hist[n + 1][fd] ** 2)))
+            res_hist[n + 1] = (T_hist[n + 1] - T_hist[0]) + Wint_hist[n + 1] + Wdamp_hist[n + 1] - Wext_hist[n + 1]
+            p_prev = p_curr.copy()
+            R_prev = np.array(R_curr, dtype=float).copy()
+            v_prev = np.array(v_curr, dtype=float).copy()
+        except Exception:
+            pass
         drift_hist[n + 1] = _compute_drift(u_n, drift_nodes, drift_height, model, base_nodes)
         vb_hist[n + 1] = model.base_shear(u_n, base_nodes=base_nodes)
         hinge_hist.append(inf_last.get("hinges", []))
@@ -325,6 +390,14 @@ def explicit_verlet(
         "Vb": vb_hist,
         "iters": iters_hist,
         "hinges": hinge_hist,
+        "energy": {
+            "T": T_hist,
+            "W_ext": Wext_hist,
+            "W_int": Wint_hist,
+            "W_damp": Wdamp_hist,
+            "W_pl": Wpl_hist,
+            "residual": res_hist,
+        },
         "dt": dt,
         "dt_sub": float(dt_sub),
         "dt_crit_est": float(dt_crit) if np.isfinite(dt_crit) else float("nan"),

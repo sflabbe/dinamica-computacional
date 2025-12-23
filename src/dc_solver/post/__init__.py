@@ -9,6 +9,7 @@ from .hinge_exports import (
     plot_time_gradient,
 )
 from .fiber_mesh_plot import plot_rect_fiber_mesh_connectivity, rect_mesh_centroids
+from .energy_balance import export_anregung, export_energy_balance
 
 __all__ = [
     "add_time_gradient_line",
@@ -18,4 +19,6 @@ __all__ = [
     "plot_time_gradient",
     "plot_rect_fiber_mesh_connectivity",
     "rect_mesh_centroids",
+    "export_anregung",
+    "export_energy_balance",
 ]

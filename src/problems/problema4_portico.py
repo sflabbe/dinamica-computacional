@@ -48,6 +48,7 @@ from dc_solver.post.hinge_exports import export_problem4_hinges
 from dc_solver.reporting.run_info import build_run_info, write_run_info
 from dc_solver.post.hysteresis_gradient import add_time_gradient_line, add_colorbar
 from dc_solver.post.plotting import plot_structure_states, write_member_stress_csv
+from dc_solver.post.energy_balance import export_anregung, export_energy_balance
 
 
 def mirror_section_about_middepth(sec: RCSectionRect) -> RCSectionRect:
@@ -201,6 +202,7 @@ def build_portal_beam_hinge(
     fiber_ny: int = 20,
     fiber_nz: int = 14,
     fiber_line_search: bool = False,
+    out_dir: Path | None = None,
     explicit_mass_dt: Optional[float] = None,
 ) -> Tuple[Model, Dict]:
     dm = DofManager()
@@ -775,6 +777,7 @@ def run_incremental_amplitudes(
     debug_cutback: bool = False,
     # Optional: backtracking line search inside Newton (gravity + implicit dynamics)
     line_search: bool = False,
+    out_dir: Path | None = None,
 ):
     """Incremental Dynamic Analysis with a reusable gravity preload.
 
@@ -944,6 +947,27 @@ def run_incremental_amplitudes(
                 out["A_input_g"] = float(A_g)
                 out["zeta"] = float(zeta)
                 out["T0"] = float(T0)
+
+                # Export per-anregung diagnostics (energy balance + excitation)
+                if out_dir is not None:
+                    try:
+                        ida_dir = Path(out_dir) / "ida"
+                        ida_dir.mkdir(parents=True, exist_ok=True)
+                        prefix = f"problem4_Ag_{A_g:.2f}g"
+                        export_anregung(ida_dir, prefix, out["t"], out["ag"])
+                        if isinstance(out.get("energy", None), dict):
+                            export_energy_balance(ida_dir, prefix, out["t"], out["energy"])
+                        # Compact NPZ for re-plotting
+                        e = out.get("energy", {}) if isinstance(out.get("energy", None), dict) else {}
+                        np.savez_compressed(
+                            ida_dir / f"{prefix}_history.npz",
+                            t=out["t"], ag=out["ag"], drift=out.get("drift", None), Vb=out.get("Vb", None),
+                            T=e.get("T", None), W_ext=e.get("W_ext", None), W_int=e.get("W_int", None),
+                            W_damp=e.get("W_damp", None), W_pl=e.get("W_pl", None), residual=e.get("residual", None),
+                        )
+                    except Exception:
+                        pass
+
                 last = out
                 model_last = model
                 dt_hist.append(float(out["dt"]))
@@ -1014,6 +1038,31 @@ def plot_results(
 
     # Full exports for dissertation figures (CSV + plots)
     export_problem4_hinges(out, model, last)
+
+    # Convenience exports for the *last* run in the root output folder
+    # (IDA per-amplitude exports go into out_dir/ida when out_dir is provided).
+    try:
+        Ag = last.get("A_input_g", None)
+        prefix = f"problem4_last_Ag_{float(Ag):.2f}g" if Ag is not None else "problem4_last"
+        export_anregung(out, prefix, last["t"], last["ag"])
+        if isinstance(last.get("energy", None), dict):
+            export_energy_balance(out, prefix, last["t"], last["energy"])
+        e = last.get("energy", {}) if isinstance(last.get("energy", None), dict) else {}
+        np.savez_compressed(
+            out / f"{prefix}_history.npz",
+            t=last.get("t", None),
+            ag=last.get("ag", None),
+            drift=last.get("drift", None),
+            Vb=last.get("Vb", None),
+            T=e.get("T", None),
+            W_ext=e.get("W_ext", None),
+            W_int=e.get("W_int", None),
+            W_damp=e.get("W_damp", None),
+            W_pl=e.get("W_pl", None),
+            residual=e.get("residual", None),
+        )
+    except Exception:
+        pass
 
 
 
@@ -1432,6 +1481,7 @@ def main():
             beam_hinge=args.beam_hinge,
             fiber_ny=int(getattr(args, "fiber_ny", 20)),
             fiber_nz=int(getattr(args, "fiber_nz", 14)),
+            out_dir=out,
         )
         plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out)
         _write_basic_plots(out, last)
@@ -1470,6 +1520,7 @@ def main():
         line_search=bool(getattr(args, "line_search", False)),
         fiber_ny=int(getattr(args, "fiber_ny", 20)),
         fiber_nz=int(getattr(args, "fiber_nz", 14)),
+        out_dir=out_shm,
     )
     plot_results(last_shm, model_shm, meta_shm, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out_shm)
     _write_basic_plots(out_shm, last_shm)
@@ -1501,6 +1552,7 @@ def main():
         line_search=bool(getattr(args, "line_search", False)),
         fiber_ny=int(getattr(args, "fiber_ny", 20)),
         fiber_nz=int(getattr(args, "fiber_nz", 14)),
+        out_dir=out_fib,
     )
     plot_results(last_fib, model_fib, meta_fib, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out_fib)
     _write_basic_plots(out_fib, last_fib)

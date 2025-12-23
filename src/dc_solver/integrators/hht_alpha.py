@@ -179,6 +179,20 @@ def hht_alpha_newton(
     iters_hist = np.zeros(n_steps - 1, dtype=int)
     hinge_hist = []
 
+    # --- Energy balance accumulators (cumulative works + kinetic) ---
+    T_hist = np.zeros(n_steps)
+    Wext_hist = np.zeros(n_steps)
+    Wint_hist = np.zeros(n_steps)
+    Wdamp_hist = np.zeros(n_steps)
+    Wpl_hist = np.zeros(n_steps)
+    res_hist = np.zeros(n_steps)
+    p_prev = None  # type: ignore
+    R_prev = None  # type: ignore
+    v_prev = None  # type: ignore
+    Rint_final = None  # type: ignore
+
+
+
     # Handle Load History
     if load_hist is None:
         load_hist = np.zeros((n_steps, nd))
@@ -218,6 +232,18 @@ def hht_alpha_newton(
     a_hist[0] = a_n
     drift_hist[0] = _compute_drift(u_n, drift_nodes, drift_height, model, base_nodes)
     vb_hist[0] = model.base_shear(u_n, base_nodes=base_nodes)
+
+    # Energy balance init at step 0 (free DOFs only)
+    try:
+        model.update_column_yields(u_n)
+        _, R0, _ = model.assemble(u_n, u_n)
+        p0 = p_const + load_hist[0] - M_diag * r * ag[0]
+        T_hist[0] = 0.5 * float(np.sum(M_diag[fd] * (v_n[fd] ** 2)))
+        p_prev = p0[fd].copy()
+        R_prev = R0.copy()
+        v_prev = v_n[fd].copy()
+    except Exception:
+        pass
 
     snapshot_idx: Optional[int] = None
     
@@ -263,6 +289,8 @@ def hht_alpha_newton(
 
             # Get Tangent Stiffness and Internal Forces
             K_tan, Rint, inf = model.assemble(u_trial, u_comm_step)
+            Rint_final = Rint
+
 
             # Update kinematics based on HHT formulas
             # u_trial = u_pred + beta*dt^2 * a_trial  => solve for a_trial
@@ -351,6 +379,43 @@ def hht_alpha_newton(
         u_hist[n + 1] = u_n
         v_hist[n + 1] = v_n
         a_hist[n + 1] = a_n
+
+        # Energy balance update
+        try:
+            du = (u_hist[n + 1][fd] - u_hist[n][fd])
+            p_curr = (p_const + load_hist[n + 1] - M_diag * r * ag[n + 1])[fd]
+            R_curr = Rint_final
+            if p_prev is None:
+                p_prev = (p_const + load_hist[n] - M_diag * r * ag[n])[fd]
+            if R_prev is None:
+                _, R_prev0, _ = model.assemble(u_hist[n], u_hist[n])
+                R_prev = R_prev0
+            if v_prev is None:
+                v_prev = v_hist[n][fd]
+            dWext = 0.5 * float(np.dot((p_prev + p_curr), du))
+            dWint = 0.5 * float(np.dot((R_prev + R_curr), du))
+            pow_d0 = float(np.sum(C_diag[fd] * (v_prev ** 2)))
+            v_curr = v_hist[n + 1][fd]
+            pow_d1 = float(np.sum(C_diag[fd] * (v_curr ** 2)))
+            dWd = 0.5 * (pow_d0 + pow_d1) * float(dt)
+            Wext_hist[n + 1] = Wext_hist[n] + dWext
+            Wint_hist[n + 1] = Wint_hist[n] + dWint
+            Wdamp_hist[n + 1] = Wdamp_hist[n] + dWd
+            dWpl = 0.0
+            if isinstance(final_inf, dict) and isinstance(final_inf.get('hinges', None), list):
+                for hh in final_inf.get('hinges', []):
+                    try:
+                        dWpl += float(hh.get('dW_pl', 0.0))
+                    except Exception:
+                        pass
+            Wpl_hist[n + 1] = Wpl_hist[n] + float(dWpl)
+            T_hist[n + 1] = 0.5 * float(np.sum(M_diag[fd] * (v_hist[n + 1][fd] ** 2)))
+            res_hist[n + 1] = (T_hist[n + 1] - T_hist[0]) + Wint_hist[n + 1] + Wdamp_hist[n + 1] - Wext_hist[n + 1]
+            p_prev = p_curr.copy()
+            R_prev = np.array(R_curr, dtype=float).copy()
+            v_prev = np.array(v_curr, dtype=float).copy()
+        except Exception:
+            pass
         
         current_drift = _compute_drift(u_n, drift_nodes, drift_height, model, base_nodes)
         drift_hist[n + 1] = current_drift
@@ -401,6 +466,14 @@ def hht_alpha_newton(
         "Vb": vb_hist,
         "iters": iters_hist,
         "hinges": hinge_hist,
+        "energy": {
+            "T": T_hist,
+            "W_ext": Wext_hist,
+            "W_int": Wint_hist,
+            "W_damp": Wdamp_hist,
+            "W_pl": Wpl_hist,
+            "residual": res_hist,
+        },
         "dt": dt,
         "alpha": alpha,
         "gamma": hht.gamma,
