@@ -1,0 +1,47 @@
+{
+  "job": "problem4_portico",
+  "timestamp": "2025-12-23T02:25:39",
+  "cwd": "/home/user/dinamica-computacional",
+  "output_dir": "/home/user/dinamica-computacional/outputs/problem4_shm_hht",
+  "python": "3.11.14",
+  "platform": "Linux-4.4.0-x86_64-with-glibc2.39",
+  "argv": [
+    "problema4_portico",
+    "--integrator",
+    "hht",
+    "--beam-hinge",
+    "shm",
+    "--state",
+    "ida",
+    "--gravity-steps",
+    "10",
+    "--ag-min",
+    "0.1",
+    "--ag-max",
+    "0.2",
+    "--ag-step",
+    "0.1"
+  ],
+  "meta": {
+    "problem": 4,
+    "integrator": "hht",
+    "beam_hinge": "shm",
+    "nlgeom": false,
+    "nseg": 6,
+    "drift_limit": 0.1,
+    "snapshot_limit": 0.04,
+    "alpha": -0.05,
+    "line_search": false,
+    "dt_hist": [
+      0.002,
+      0.002
+    ],
+    "amps_g_used": [
+      0.1,
+      0.2
+    ],
+    "dt": 0.002,
+    "n_steps": 5000,
+    "peak_drift": 0.02839771129727611
+  }
+}

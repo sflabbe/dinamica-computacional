@@ -1,0 +1,56 @@
+{
+  "timestamp": "2025-12-23T02:23:07.587271",
+  "git": {
+    "commit_hash": "612b971ff77ddd0716f75885f67623facf90ca81",
+    "commit_short": "612b971f",
+    "is_dirty": true,
+    "dirty_files": [
+      "?? outputs/",
+      "?? tools/profile_run.py",
+      "?? tools/profiling_utils.py"
+    ]
+  },
+  "command_line": "python tools/profile_run.py --tag baseline_hht_gravity --integrator hht --beam-hinge shm --state gravity",
+  "python_version": "3.11.14",
+  "platform": {
+    "system": "Linux",
+    "release": "4.4.0",
+    "machine": "x86_64"
+  },
+  "cpu": {
+    "model": "unknown",
+    "physical_cores": 16,
+    "logical_cores": 16
+  },
+  "thread_control_env": {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1"
+  },
+  "single_thread_baseline_valid": true,
+  "baseline_warnings": [],
+  "packages": {
+    "numpy": "2.4.0"
+  },
+  "problem_params": {
+    "problem": "Problem 4 Portal Frame",
+    "integrator": "hht",
+    "beam_hinge": "shm",
+    "state": "gravity",
+    "nlgeom": false,
+    "H": 3.0,
+    "L": 5.0,
+    "nseg": 6,
+    "n_elem": 18,
+    "n_hinge": 4,
+    "ndof": 24,
+    "gravity_steps": 10,
+    "nsteps": 10,
+    "dt": "static"
+  },
+  "timing": {
+    "wall_time_sec": 5.782892227172852,
+    "cpu_time_sec": 5.39
+  }
+}
