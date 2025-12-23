@@ -16,7 +16,7 @@ def test_beam2d_linear_stiffness_matrix():
         Node(0.0, 0.0, dm.new_trans(), dm.new_rot()),
         Node(L, 0.0, dm.new_trans(), dm.new_rot()),
     ]
-    beam = FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes)
+    beam = FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes, beam_theory="euler")
 
     dofs, K, _, _ = beam.stiffness_and_force_global(np.zeros(dm.ndof))
     assert dofs.size == 6
@@ -54,7 +54,7 @@ def test_beam2d_global_transformation_matches_rotation():
         Node(0.0, 0.0, dm.new_trans(), dm.new_rot()),
         Node(L / np.sqrt(2.0), L / np.sqrt(2.0), dm.new_trans(), dm.new_rot()),
     ]
-    beam = FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes)
+    beam = FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes, beam_theory="euler")
     Lc, c, s = beam._geom()
     k_local = beam.k_local()
     T = rot2d(c, s)

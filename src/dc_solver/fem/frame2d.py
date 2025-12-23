@@ -33,7 +33,7 @@ class FrameElementLinear2D:
     # Beam theory
     # - "euler": Euler–Bernoulli (no shear deformation)
     # - "timoshenko": includes shear deformation via kappa*G*A shear stiffness
-    beam_theory: str = "euler"
+    beam_theory: str = "timoshenko"
 
     # Shear properties for Timoshenko
     nu: float = 0.2          # Poisson's ratio (used to compute G if G is None)
