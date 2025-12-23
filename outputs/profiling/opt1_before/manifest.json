@@ -1,0 +1,56 @@
+{
+  "timestamp": "2025-12-23T02:32:10.628996",
+  "git": {
+    "commit_hash": "b4d374cc6bfda859f2fcb76819f416216fa56e1d",
+    "commit_short": "b4d374cc",
+    "is_dirty": true,
+    "dirty_files": [
+      "M outputs/problem4_shm_hht/problem4_runinfo.json",
+      "?? outputs/profiling/opt1_before/"
+    ]
+  },
+  "command_line": "python tools/profile_run.py --tag opt1_before --integrator hht --beam-hinge shm --state ida",
+  "python_version": "3.11.14",
+  "platform": {
+    "system": "Linux",
+    "release": "4.4.0",
+    "machine": "x86_64"
+  },
+  "cpu": {
+    "model": "unknown",
+    "physical_cores": 16,
+    "logical_cores": 16
+  },
+  "thread_control_env": {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1"
+  },
+  "single_thread_baseline_valid": true,
+  "baseline_warnings": [],
+  "packages": {
+    "numpy": "2.4.0"
+  },
+  "problem_params": {
+    "problem": "Problem 4 Portal Frame",
+    "integrator": "hht",
+    "beam_hinge": "shm",
+    "state": "ida",
+    "nlgeom": false,
+    "H": 3.0,
+    "L": 5.0,
+    "nseg": 6,
+    "n_elem": 18,
+    "n_hinge": 4,
+    "ndof": 24,
+    "ag_min": 0.1,
+    "ag_max": 0.2,
+    "ag_step": 0.1,
+    "n_ida_runs": 2
+  },
+  "timing": {
+    "wall_time_sec": 74.39350032806396,
+    "cpu_time_sec": 69.39
+  }
+}
