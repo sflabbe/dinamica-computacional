@@ -35,6 +35,7 @@ from dc_solver.fem.model import Model
 from dc_solver.fem.utils import discretize_member
 from dc_solver.hinges.models import (
     ColumnHingeNM2D,
+    ColumnHingeNMRot,
     HingeNM2DElement,
     SHMBeamHinge1D,
     FiberBeamHinge1D,
@@ -46,7 +47,7 @@ from dc_solver.integrators import solve_dynamic
 from dc_solver.post.hinge_exports import export_problem4_hinges
 from dc_solver.reporting.run_info import build_run_info, write_run_info
 from dc_solver.post.hysteresis_gradient import add_time_gradient_line, add_colorbar
-from dc_solver.post.plotting import plot_structure_states
+from dc_solver.post.plotting import plot_structure_states, write_member_stress_csv
 
 
 def mirror_section_about_middepth(sec: RCSectionRect) -> RCSectionRect:
@@ -197,6 +198,9 @@ def build_portal_beam_hinge(
     beam_hinge: str = "shm",  # "shm" | "fiber"
     mass_mode: str = "distributed",  # "roof" | "distributed"
     include_rot_inertia: bool = True,
+    fiber_ny: int = 20,
+    fiber_nz: int = 14,
+    fiber_line_search: bool = False,
     explicit_mass_dt: Optional[float] = None,
 ) -> Tuple[Model, Dict]:
     dm = DofManager()
@@ -301,21 +305,75 @@ def build_portal_beam_hinge(
     right_elems = add_member(right_nodes, A_col_eff, I_col_eff)
     beam_elems = add_member(beam_nodes, A_beam_eff, I_beam_eff)
     hinges: List[RotSpringElement | FiberRotSpringElement | HingeNM2DElement] = []
-    hinge_left = ColumnHingeNM2D(
-        hinge=PlasticHingeNM(surface=surf_col, K=np.diag([KN_col, KM_col]), enable_substepping=True),
-    )
-    hinge_right = ColumnHingeNM2D(
-        hinge=PlasticHingeNM(surface=surf_col, K=np.diag([KN_col, KM_col]), enable_substepping=True),
-    )
-    hinges.append(HingeNM2DElement(0, i0L, hinge_left, nodes))
-    hinges.append(HingeNM2DElement(1, i1R, hinge_right, nodes))
+
+    # --- Column plastic hinges (N-M interaction -> My(N), rotation-only spring) ---
+    col_left = ColumnHingeNMRot(surface=surf_col, k0=KM_col, alpha_post=1e-4)
+    col_right = ColumnHingeNMRot(surface=surf_col, k0=KM_col, alpha_post=1e-4)
+    # Initialize with N_ref=0; will be updated every increment via Model.update_column_yields(...)
+    col_left.set_yield_from_N(0.0)
+    col_right.set_yield_from_N(0.0)
+    idx_col_L = len(hinges)
+    hinges.append(RotSpringElement(0, i0L, "col_nm", col_left, None, nodes))
+    idx_col_R = len(hinges)
+    hinges.append(RotSpringElement(1, i1R, "col_nm", col_right, None, nodes))
+
 
     beam_hinge = str(beam_hinge).lower().strip()
     if beam_hinge == "shm":
-        shm_left = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
-        shm_right = SHMBeamHinge1D(K0_0=k_beam0, My_0=My_beam)
-        hinges.append(RotSpringElement(2, i2B, "beam_shm", None, shm_left, nodes))
-        hinges.append(RotSpringElement(3, i3B, "beam_shm", None, shm_right, nodes))
+        # SHM calibration (v9): mild degradation + My(N) under compression
+        Ncr_beam = float(A_beam) * float(fy)
+        shm_left = SHMBeamHinge1D(
+            K0_0=k_beam0,
+            My_0=My_beam,
+            alpha_post=0.03,
+            bw_n=10.0,
+            pinch=0.0,
+            b1=0.05,
+            b2=0.15,
+            eta=1.0,
+            N_cr=Ncr_beam,
+            My_floor_frac_N=0.6,
+        )
+        shm_right = SHMBeamHinge1D(
+            K0_0=k_beam0,
+            My_0=My_beam,
+            alpha_post=0.03,
+            bw_n=10.0,
+            pinch=0.0,
+            b1=0.05,
+            b2=0.15,
+            eta=1.0,
+            N_cr=Ncr_beam,
+            My_floor_frac_N=0.6,
+        )
+
+        # Couple each hinge to its adjacent roof-beam element so Model.assemble can update N_comp_current.
+        hinges.append(
+            RotSpringElement(
+                2,
+                i2B,
+                "beam_shm",
+                None,
+                shm_left,
+                nodes,
+                beam_idx=int(beam_elems[0]),
+                beam_sign=-1.0,
+                name="beam_shm_L",
+            )
+        )
+        hinges.append(
+            RotSpringElement(
+                3,
+                i3B,
+                "beam_shm",
+                None,
+                shm_right,
+                nodes,
+                beam_idx=int(beam_elems[-1]),
+                beam_sign=-1.0,
+                name="beam_shm_R",
+            )
+        )
     elif beam_hinge == "fiber":
         # Fiber hinge: same materials as above but with stateful steel (better unloading / residual strains)
         beam_sec = build_rc_rect_fiber_section_2d_stateful(
@@ -325,8 +383,7 @@ def build_portal_beam_hinge(
             fc=fc,
             fy=fy,
             Es=Es,
-            ny=50,
-            nz=30,
+            ny=int(fiber_ny), nz=int(fiber_nz),
             clustering="cosine",
             rebar_layers=[
                 (3 * _rebar_area(phi20), cover, 3),
@@ -341,8 +398,7 @@ def build_portal_beam_hinge(
             fc=fc,
             fy=fy,
             Es=Es,
-            ny=50,
-            nz=30,
+            ny=int(fiber_ny), nz=int(fiber_nz),
             clustering="cosine",
             rebar_layers=[
                 (3 * _rebar_area(phi20), cover, 3),
@@ -350,10 +406,50 @@ def build_portal_beam_hinge(
             ],
         )
         # Use the same Lp_beam defined above (macro-element hinge length)
-        fiber_left = FiberBeamHinge1D(section=beam_sec, Lp=Lp_beam, N_target=0.0)
-        fiber_right = FiberBeamHinge1D(section=beam_sec_R, Lp=Lp_beam, N_target=0.0)
-        hinges.append(FiberRotSpringElement(2, i2B, fiber_left, nodes))
-        hinges.append(FiberRotSpringElement(3, i3B, fiber_right, nodes))
+        # NOTE: N_target should follow the *actual* axial force in the roof beam.
+        # We attach each fiber spring to the adjacent roof-beam frame element so that
+        # Model.assemble can update hinge.N_target every iteration/time step.
+        fiber_left = FiberBeamHinge1D(
+            section=beam_sec,
+            Lp=Lp_beam,
+            N_target=0.0,  # overwritten during assembly from beam axial force
+            kappa_factor=2.0,
+            moment_sign=-1.0,
+            line_search=bool(fiber_line_search),
+        )
+        fiber_right = FiberBeamHinge1D(
+            section=beam_sec_R,
+            Lp=Lp_beam,
+            N_target=0.0,  # overwritten during assembly from beam axial force
+            kappa_factor=2.0,
+            moment_sign=-1.0,
+            line_search=bool(fiber_line_search),
+        )
+
+        # FrameElementLinear2D reports N in tension-positive convention, while the
+        # fiber section uses compression-positive. beam_sign=-1 converts conventions.
+        hinges.append(
+            FiberRotSpringElement(
+                2,
+                i2B,
+                fiber_left,
+                nodes,
+                beam_idx=int(beam_elems[0]),
+                beam_sign=-1.0,
+                name="beam_hinge_L",
+            )
+        )
+        hinges.append(
+            FiberRotSpringElement(
+                3,
+                i3B,
+                fiber_right,
+                nodes,
+                beam_idx=int(beam_elems[-1]),
+                beam_sign=-1.0,
+                name="beam_hinge_R",
+            )
+        )
     else:
         raise ValueError(f"Unknown beam_hinge: {beam_hinge!r} (use 'shm' or 'fiber')")
 
@@ -366,16 +462,40 @@ def build_portal_beam_hinge(
     mass = np.zeros(nd)
     C = np.zeros(nd)
     p0 = np.zeros(nd)
+    # Gravity load: distribute the total vertical gravity load across *all* frame
+    # elements (columns + roof beam), using *physical* member areas (A_col/A_beam)
+    # and physical member lengths (H/L).
+    #
+    # NOTE: In Problem 4 we use A_eff/I_eff to keep the elastic stiffness correct
+    # after extracting plastic hinge zones. Those A_eff values should NOT be used to
+    # compute gravity (self-weight) because they are not physical. Using A_col/A_beam
+    # keeps Problem 4 and Problem 6 directly comparable.
+    vol_total = 2.0 * float(A_col) * float(H) + float(A_beam) * float(L)
+    w_gravity_col = 0.0
+    w_gravity_beam = 0.0
 
-    total_length = sum(float(e._geom()[0]) for e in beams)
-    if total_length > 0.0:
-        w = float(P_gravity_total) / total_length
-        for e in beams:
-            f_g = e.equiv_nodal_load_global((0.0, -w))
+    if vol_total > 0.0:
+        w_gravity_col = float(P_gravity_total) * float(A_col) / vol_total  # N/m
+        w_gravity_beam = float(P_gravity_total) * float(A_beam) / vol_total  # N/m
+
+        col_eids = set(left_elems + right_elems)
+        beam_eids = set(beam_elems)
+
+        for eid, e in enumerate(beams):
+            if eid in col_eids:
+                w_e = w_gravity_col
+            elif eid in beam_eids:
+                w_e = w_gravity_beam
+            else:
+                # Fallback (should not happen): weight by element effective area.
+                w_e = float(P_gravity_total) * float(e.A) / max(vol_total, 1e-12)
+            f_g = e.equiv_nodal_load_global((0.0, -w_e))
             dofs = e.dofs()
             for a, ia in enumerate(dofs):
                 p0[ia] += f_g[a]
 
+    uy_dofs_unique = np.unique(np.array([n.dof_u[1] for n in nodes], dtype=int))
+    gravity_Fy_total = float(np.sum(p0[uy_dofs_unique]))
     model = Model(
         nodes=nodes,
         beams=beams,
@@ -384,7 +504,7 @@ def build_portal_beam_hinge(
         mass_diag=mass,
         C_diag=C,
         load_const=p0,
-        col_hinge_groups=[],
+        col_hinge_groups=[(idx_col_L, int(left_elems[0]), -1), (idx_col_R, int(right_elems[0]), -1)],
         nlgeom=nlgeom,
     )
 
@@ -465,6 +585,14 @@ def build_portal_beam_hinge(
         "L": L,
         "nseg": nseg_use,
         "member_elements": {"left": left_elems, "right": right_elems, "beam": beam_elems},
+
+        # Loading (gravity reference)
+"P_gravity_total": float(P_gravity_total),
+"gravity_scheme": "all_elements_area_length",
+"gravity_vol_total": float(vol_total),
+"gravity_w_col": float(w_gravity_col),
+"gravity_w_beam": float(w_gravity_beam),
+"gravity_Fy_total": float(gravity_Fy_total),
     }
     return model, meta
 
@@ -631,11 +759,40 @@ def run_incremental_amplitudes(
     alpha=-0.05,
     nseg: int = 6,
     cover: float = 0.05,
+    fiber_ny: int = 20,
+    fiber_nz: int = 14,
     nlgeom: bool = False,
     beam_hinge: str = "shm",
+    # Step 2 solver controls
+    max_iter: int = 50,
+    tol: float = 1e-6,
+    # Step 1 gravity controls
+    gravity_steps: int = 10,
+    gravity_max_iter: int = 80,
+    gravity_tol: float = 1e-10,
+    gravity_verbose: bool = False,
+    # Diagnostics
+    debug_cutback: bool = False,
+    # Optional: backtracking line search inside Newton (gravity + implicit dynamics)
+    line_search: bool = False,
 ):
+    """Incremental Dynamic Analysis with a reusable gravity preload.
+
+    Workflow:
+      Step 1: Gravity (static) -> committed hinge states + u_grav
+      Step 2: Dynamic (IDA)    -> start each run from the gravity-preloaded state
+
+    Notes:
+      - Gravity is solved once per model build (per hinge option).
+      - Each dt cutback attempt starts from a pristine deep-copy of the gravity-preloaded model.
+    """
+
+    import copy
+
     g = 9.81
-    model, meta = build_portal_beam_hinge(
+
+    # Build model (contains hinges) and run gravity once.
+    model0, meta = build_portal_beam_hinge(
         H=H,
         L=L,
         T0=T0,
@@ -645,19 +802,121 @@ def run_incremental_amplitudes(
         cover=cover,
         nlgeom=nlgeom,
         beam_hinge=beam_hinge,
+        fiber_ny=int(fiber_ny),
+        fiber_nz=int(fiber_nz),
+        fiber_line_search=bool(line_search),
     )
 
-    peak_drifts = []
-    dt_hist = []
-    last = None
+    grav = solve_gravity_only(
+        model0,
+        tol=float(gravity_tol),
+        max_iter=int(gravity_max_iter),
+        n_load_steps=int(gravity_steps),
+        line_search=bool(line_search),
+        verbose=bool(gravity_verbose),
+    )
+    u_grav = np.array(grav["u"], dtype=float)
 
+    # Snapshot a reusable gravity-preloaded template.
+    model_tpl = copy.deepcopy(model0)
+
+    meta.update(
+        {
+            "line_search": bool(line_search),
+            "H": float(H),
+            "L": float(L),
+            "T0": float(T0),
+            "zeta": float(zeta),
+            "gravity": {
+                "steps": int(gravity_steps),
+                "max_iter": int(gravity_max_iter),
+                "tol": float(gravity_tol),
+                "ux_roof": float(grav.get("ux_roof", float("nan"))),
+                "uy_roof": float(grav.get("uy_roof", float("nan"))),
+                "drift": float(grav.get("drift", float("nan"))),
+            },
+        }
+    )
+
+    # --- Mass / excitation sanity checks (debug) ---
+    nd = model_tpl.ndof()
+    fd = model_tpl.free_dofs()
+
+    # Unique translational DOFs (aux nodes may share translations)
+    ux_dofs = np.unique(np.array([n.dof_u[0] for n in model_tpl.nodes], dtype=int))
+    uy_dofs = np.unique(np.array([n.dof_u[1] for n in model_tpl.nodes], dtype=int))
+
+    ux_free = np.intersect1d(ux_dofs, fd, assume_unique=False)
+    uy_free = np.intersect1d(uy_dofs, fd, assume_unique=False)
+
+    mass_ux_total = float(np.sum(model_tpl.mass_diag[ux_dofs]))
+    mass_uy_total = float(np.sum(model_tpl.mass_diag[uy_dofs]))
+    mass_ux_free_total = float(np.sum(model_tpl.mass_diag[ux_free]))
+    mass_uy_free_total = float(np.sum(model_tpl.mass_diag[uy_free]))
+
+    # Influence vector for horizontal base excitation (ux only)
+    r = np.zeros(nd)
+    for node in model_tpl.nodes:
+        r[node.dof_u[0]] = 1.0
+    m_eff_ux_free = float(np.sum((model_tpl.mass_diag * r)[fd]))
+
+    meta.update(
+        {
+            "mass_ux_total": mass_ux_total,
+            "mass_uy_total": mass_uy_total,
+            "mass_ux_free_total": mass_ux_free_total,
+            "mass_uy_free_total": mass_uy_free_total,
+            "m_eff_ux_free": m_eff_ux_free,
+            "n_dof": int(nd),
+            "n_free": int(fd.size),
+            "n_mass_pos": int(np.sum(model_tpl.mass_diag > 0.0)),
+        }
+    )
+
+    print("[problema4] mass sanity:")
+    print(f"  ndof={nd} nfree={fd.size} n_mass_pos={meta['n_mass_pos']}")
+    print(f"  M_ux_total={mass_ux_total:.6e}  M_ux_free={mass_ux_free_total:.6e}  m_eff_ux_free={m_eff_ux_free:.6e}")
+    print(f"  M_uy_total={mass_uy_total:.6e}  M_uy_free={mass_uy_free_total:.6e}")
+
+    if mass_ux_free_total <= 0.0 or not np.isfinite(mass_ux_free_total):
+        raise RuntimeError(
+            "Problema4: ux mass on FREE DOFs is zero/invalid -> base excitation produces ~0 inertial forcing. Check mass assignment."
+        )
+
+    peak_drifts: list[float] = []
+    dt_hist: list[float] = []
+    last = None
+    model_last = model_tpl
+
+    amps_g = np.array(list(amps_g), dtype=float)
     print(f"[problema4] Incremental dynamic analysis: {len(amps_g)} amplitudes, integrator={integrator}")
     for idx, A_g in enumerate(amps_g):
         A = float(A_g) * g
-        dt = base_dt
+        dt = float(base_dt)
+
         while True:
-            t = make_time(t_end, dt)
+            # Fresh copy per attempt (avoids polluting the committed hinge history on failed dt tries)
+            model = copy.deepcopy(model_tpl)
+            u0 = u_grav.copy()
+            v0 = np.zeros(model.ndof())
+
+            t = make_time(float(t_end), float(dt))
             ag = ag_fun(t, A)
+
+            # effective inertial forcing amplitude on free DOFs (ux only)
+            if debug_cutback:
+                try:
+                    nd_ = model.ndof()
+                    fd_ = model.free_dofs()
+                    r_ = np.zeros(nd_)
+                    for node in model.nodes:
+                        r_[node.dof_u[0]] = 1.0
+                    f_in = (model.mass_diag * r_) * ag  # N = kg*m/s^2
+                    fpk = float(np.max(np.abs(f_in[fd_]))) if fd_.size else float("nan")
+                    print(f"    dt={dt:.6f}  ag_pk={float(np.max(np.abs(ag))):.4f}  |F_inert|_pk_free={fpk:.6e}")
+                except Exception:
+                    pass
+
             try:
                 out = solve_dynamic(
                     integrator,
@@ -672,34 +931,45 @@ def run_incremental_amplitudes(
                     gamma=0.50,
                     base_nodes=(0, 1),
                     drift_nodes=(2, 3),
-                    max_iter=50,
-                    tol=1e-6,
-                    verbose=False,
+                    max_iter=int(max_iter),
+                    tol=float(tol),
+                    # Explicit can look "zombie" (no Newton prints). Provide a small
+                    # header + stability substepping info by default.
+                    verbose=bool(debug_cutback) or (integrator == "explicit"),
+                    line_search=bool(line_search),
+                    u0=u0,
+                    v0=v0,
                 )
                 out["A_ms2"] = float(A)
                 out["A_input_g"] = float(A_g)
                 out["zeta"] = float(zeta)
                 out["T0"] = float(T0)
                 last = out
+                model_last = model
                 dt_hist.append(float(out["dt"]))
                 break
-            except RuntimeError:
-                if dt <= dt_min + 1e-15:
+            except RuntimeError as e:
+                if debug_cutback:
+                    print(f"    cutback: A_g={A_g:.2f} dt={dt:g} failed: {e}")
+                if dt <= float(dt_min) + 1e-15:
                     print(f"  [{idx+1}/{len(amps_g)}] A_g={A_g:.2f} - COLLAPSE (dt<dtmin)")
                     meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
-                    return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
+                    return peak_drifts, amps_g[:len(peak_drifts)], last, model_last, meta
                 dt *= 0.5
+                continue
 
-        pk = float(np.max(np.abs(out["drift"])))
+        pk = float(np.max(np.abs(last["drift"]))) if last is not None else float("nan")
         peak_drifts.append(pk)
         pct = 100.0 * (idx + 1) / len(amps_g)
-        print(f"  [{idx+1}/{len(amps_g)}] ({pct:5.1f}%) A_g={A_g:.2f} drift_max={pk:.4f} dt={out['dt']:.5f} n_steps={len(out['t'])}")
-        if pk >= drift_limit:
-            print(f"  DRIFT LIMIT REACHED: {pk:.4f} >= {drift_limit:.4f}")
+        print(
+            f"  [{idx+1}/{len(amps_g)}] ({pct:5.1f}%) A_g={A_g:.2f} drift_max={pk:.4f} dt={last['dt']:.5f} n_steps={len(last['t'])}"
+        )
+        if pk >= float(drift_limit):
+            print(f"  DRIFT LIMIT REACHED: {pk:.4f} >= {float(drift_limit):.4f}")
             break
 
     meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
-    return peak_drifts, amps_g[:len(peak_drifts)], last, model, meta
+    return peak_drifts, amps_g[:len(peak_drifts)], last, model_last, meta
 
 
 def plot_results(
@@ -811,8 +1081,14 @@ def _try_build_problem6_reference(nseg: int, nlgeom: bool):
 
 def main():
 
-    parser = argparse.ArgumentParser(description="Problema 4: pórtico con rótulas (time-history).")
-    parser.add_argument("--state", default="ida", choices=["ida", "gravity"], help="Run mode: ida (incremental dynamic analysis) or gravity (static gravity only).")
+    parser = argparse.ArgumentParser(description="Problema 4: pórtico con rótulas (Step 1: gravity, Step 2: dynamic/IDA).")
+    # Mode selector
+    parser.add_argument("--state", default="ida", choices=["ida", "gravity"],
+                        help="Run mode: 'gravity' runs Step 1 only; 'ida' runs Step 1 then Step 2 (incremental dynamic).")
+    parser.add_argument("--gravity", action="store_true",
+                        help="Alias for --state gravity (run only Step 1).")
+
+    # Model/integration
     parser.add_argument("--integrator", default="hht", choices=["hht", "newmark", "explicit"], help="Time integrator.")
     parser.add_argument("--nlgeom", action="store_true", help="Enable geometric nonlinearity (P-Delta).")
     parser.add_argument("--nseg", type=int, default=6, help="Segments per member (visualization/mesh).")
@@ -822,7 +1098,48 @@ def main():
         choices=["shm", "fiber", "compare"],
         help="Beam end hinge model: 'shm', 'fiber', or 'compare' (runs both).",
     )
+
+    # Step 1 (gravity) controls
+    parser.add_argument("--gravity-steps", type=int, default=10, help="Load steps for gravity ramp (Step 1).")
+    parser.add_argument("--gravity-max-iter", type=int, default=80, help="Max Newton iterations per gravity load step.")
+    parser.add_argument("--gravity-tol", type=float, default=1e-10, help="Gravity Newton tolerance (relative).")
+    parser.add_argument("--gravity-verbose", action="store_true", help="Verbose output for gravity Newton.")
+
+    # Step 2 (dynamic / IDA) controls
+    parser.add_argument("--t-end", type=float, default=10.0, help="End time for dynamic step [s].")
+    parser.add_argument("--base-dt", type=float, default=0.002, help="Initial time step for dynamic step [s].")
+    parser.add_argument("--dt-min", type=float, default=0.00025, help="Minimum allowed cutback dt [s].")
+    parser.add_argument("--max-iter", type=int, default=50, help="Max Newton iterations per time step (implicit integrators).")
+    parser.add_argument("--tol", type=float, default=1e-6, help="Newton tolerance for dynamic step.")
+    parser.add_argument("--alpha", type=float, default=-0.05, help="HHT-alpha parameter (only for HHT).")
+    parser.add_argument("--drift-limit", type=float, default=0.10, help="Collapse drift limit.")
+    parser.add_argument("--snapshot-limit", type=float, default=0.04, help="Drift at which to snapshot plots.")
+
+    # IDA amplitudes (in g)
+    parser.add_argument("--ag-min", type=float, default=0.10, help="Minimum A_g to run [g].")
+    parser.add_argument("--ag-max", type=float, default=2.00, help="Maximum A_g to run [g].")
+    parser.add_argument("--ag-step", type=float, default=0.10, help="A_g increment [g].")
+
+    # Record controls
+    parser.add_argument("--T0", type=float, default=0.5, help="Target fundamental period for synthetic record [s].")
+    parser.add_argument("--zeta", type=float, default=0.02, help="Modal damping ratio for synthetic record.")
+
+    # Debugging
+    parser.add_argument("--debug-cutback", action="store_true", help="Print details for dt cutbacks (failed attempts).")
+
+    # Newton robustness
+    parser.add_argument("--line-search", action="store_true", help="Enable backtracking line search in Newton solvers (gravity + dynamic + fiber eps0 solve).")
+
+    # Fiber-section discretization (only used for --beam-hinge fiber/compare)
+    parser.add_argument("--fiber-ny", type=int, default=20, help="Fiber mesh divisions in depth (y) for RC section.")
+    parser.add_argument("--fiber-nz", type=int, default=14, help="Fiber mesh divisions in width (z) for RC section.")
+
     args = parser.parse_args()
+
+    # convenience alias
+    if getattr(args, "gravity", False):
+        args.state = "gravity"
+
 
     # --- State selector ---------------------------------------------------------
     if args.state == "gravity":
@@ -838,13 +1155,70 @@ def main():
             beam_hinge=args.beam_hinge,
             # Use distributed mass by default for consistency with dynamic runs
             mass_mode="distributed",
+            fiber_ny=int(getattr(args, 'fiber_ny', 20)),
+            fiber_nz=int(getattr(args, 'fiber_nz', 14)),
+            fiber_line_search=bool(getattr(args, 'line_search', False)),
         )
-        r4 = solve_gravity_only(model4)
+        r4 = solve_gravity_only(
+            model4,
+            tol=float(args.gravity_tol),
+            max_iter=int(args.gravity_max_iter),
+            n_load_steps=int(args.gravity_steps),
+            verbose=bool(args.gravity_verbose),
+            line_search=bool(getattr(args, 'line_search', False)),
+        )
+
+        meta4 = dict(_meta4) if isinstance(_meta4, dict) else {}
 
         # Try to build Problem 6 elastic reference (if available in this repo)
         r6 = _try_build_problem6_reference(nseg=int(args.nseg), nlgeom=bool(args.nlgeom))
+        meta6 = dict(r6.get("meta", {})) if isinstance(r6, dict) else {}
 
         txt = []
+        # --- Load verification -------------------------------------------------
+        try:
+            P4 = float(meta4.get("P_gravity_total", float("nan")))
+            Fy4 = float(meta4.get("gravity_Fy_total", float("nan")))
+            V4 = float(meta4.get("gravity_vol_total", float("nan")))
+            w4c = float(meta4.get("gravity_w_col", float("nan")))
+            w4b = float(meta4.get("gravity_w_beam", float("nan")))
+
+            P6 = float(meta6.get("P_gravity_total", float("nan")))
+            Fy6 = float(meta6.get("gravity_Fy_total", float("nan")))
+            V6 = float(meta6.get("gravity_vol_total", float("nan")))
+            w6c = float(meta6.get("gravity_w_col", float("nan")))
+            w6b = float(meta6.get("gravity_w_beam", float("nan")))
+
+            txt.append("Gravity load check (distributed self-weight on all frame elements)\n")
+            txt.append(
+                f"  P4: P={P4:.6e}N, vol=Σ(A·L)={V4:.6e} m^3, w_col={w4c:.6e}N/m, w_beam={w4b:.6e}N/m, "
+                f"sum(Fy)={Fy4:.6e}N, sum(Fy)+P={Fy4+P4:.3e}\n"
+            )
+            if not math.isnan(P6):
+                txt.append(
+                    f"  P6: P={P6:.6e}N, vol=Σ(A·L)={V6:.6e} m^3, w_col={w6c:.6e}N/m, w_beam={w6b:.6e}N/m, "
+                    f"sum(Fy)={Fy6:.6e}N, sum(Fy)+P={Fy6+P6:.3e}\n"
+                )
+            txt.append("\n")
+        except Exception:
+            pass
+
+        # --- SHM hinge parameter check (elastic-range stiffness) --------------
+        if str(args.beam_hinge).lower() == "shm":
+            try:
+                from dc_solver.hinges.models import RotSpringElement as _RotSpring
+
+                txt.append("SHM hinge check (elastic-range stiffness)\n")
+                for h in getattr(model4, "hinges", []):
+                    if isinstance(h, _RotSpring) and h.kind == "beam_shm" and h.beam_hinge is not None:
+                        K0 = float(h.beam_hinge.K0_0)
+                        My = float(h.beam_hinge.My_0)
+                        A_eff = float(h.beam_hinge.bw_A) if float(h.beam_hinge.bw_A) > 0.0 else float(K0 / max(abs(My), 1e-12))
+                        txt.append(f"  beam_shm: K0_0={K0:.6e} My_0={My:.6e} bw_A_eff~{A_eff:.6e} (target bw_A_eff≈K0/My)\n")
+                txt.append("\n")
+            except Exception:
+                pass
+
         txt.append("Problem 4 gravity-only (with hinges)\n")
         ux4 = float(r4.get("ux_roof", float("nan")))
         uy4 = float(r4.get("uy_roof", float("nan")))
@@ -868,14 +1242,97 @@ def main():
 
         out_dir.joinpath("gravity_compare.txt").write_text("".join(txt), encoding="utf-8")
         print("".join(txt))
+
+        # Optional: dump fiber beam hinge axial targets (for debugging N_target coupling)
+        try:
+            u_g = r4.get("u", None)
+            if isinstance(u_g, np.ndarray) and args.beam_hinge in ("fiber", "compare"):
+                _, _, inf = model4.assemble(u_g, u_g)
+                rows = []
+                for hinfo in (inf.get("hinges") or []):
+                    if str(hinfo.get("kind", "")) == "beam_fiber":
+                        rows.append(
+                            f"{hinfo.get('name','(beam_fiber)')}: "
+                            f"beam_idx={hinfo.get('beam_idx')} "
+                            f"N_beam_tension={float(hinfo.get('N_beam_tension', 0.0)):.6e} "
+                            f"N_target_used={float(hinfo.get('N_target_used', hinfo.get('N_target', 0.0))):.6e} "
+                            f"N_section={float(hinfo.get('N', 0.0)):.6e}"
+                        )
+                if rows:
+                    out_dir.joinpath("fiber_hinge_axial_debug.txt").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                    if bool(args.gravity_verbose):
+                        print("[gravity] Fiber hinge axial targets (compression-positive in section):")
+                        for r in rows:
+                            print("  " + r)
+        except Exception:
+            pass
+
         print(f"[problema4] Gravity-only outputs in: {out_dir.resolve()}")
+
+        # --- Gravity plots (State 1: undeformed, State 2: static equilibrium) ---
+        try:
+            u_g = r4.get("u", None)
+            if isinstance(u_g, np.ndarray):
+                # Build a minimal 'last' dict compatible with plot_structure_states
+                u_hist = np.vstack([np.zeros_like(u_g), u_g])
+                drift_hist = np.array([0.0, float(r4.get("drift", 0.0))], float)
+                last_grav = {
+                    "u": u_hist,
+                    "t": np.array([0.0, 1.0], float),
+                    "drift": drift_hist,
+                    "snapshot_limit": float(args.snapshot_limit),
+                }
+
+                # Use geometric height from the model (avoid relying on hard-coded H)
+                ys = np.array([nd.y for nd in model4.nodes], dtype=float)
+                H_plot = float(np.max(ys) - np.min(ys)) if ys.size else 1.0
+                if not np.isfinite(H_plot) or H_plot <= 0.0:
+                    H_plot = 1.0
+
+                # combined (members), and individual fields
+                plot_structure_states(
+                    model4,
+                    last_grav,
+                    drift_height=H_plot,
+                    snapshot_limit=float(args.snapshot_limit),
+                    outfile=str(out_dir / "step1_gravity_states_members.png"),
+                    field="both",
+                    shared_colorbar=False,
+                )
+                plot_structure_states(
+                    model4,
+                    last_grav,
+                    drift_height=H_plot,
+                    snapshot_limit=float(args.snapshot_limit),
+                    outfile=str(out_dir / "step1_gravity_states_U.png"),
+                    field="u",
+                    shared_colorbar=False,
+                )
+                plot_structure_states(
+                    model4,
+                    last_grav,
+                    drift_height=H_plot,
+                    snapshot_limit=float(args.snapshot_limit),
+                    outfile=str(out_dir / "step1_gravity_states_S.png"),
+                    field="s",
+                    shared_colorbar=False,
+                )
+
+                # CSV for member stress summary at gravity state
+                write_member_stress_csv(model4, u_g, out_dir / "step1_gravity_member_stress.csv")
+        except Exception as e:
+            # Plotting must never fail the run
+            (out_dir / "step1_gravity_plot_error.txt").write_text(str(e), encoding="utf-8")
+        except Exception as e:
+            # Plotting must never fail the run
+            (out_dir / "step1_gravity_plot_error.txt").write_text(str(e), encoding="utf-8")
         return
 
 
 
-    drift_limit = 0.10
-    snapshot_limit = 0.04
-    alpha = -0.05
+    drift_limit = float(args.drift_limit)
+    snapshot_limit = float(args.snapshot_limit)
+    alpha = float(args.alpha)
     nseg = int(args.nseg)
     nlgeom = bool(args.nlgeom)
 
@@ -930,6 +1387,7 @@ def main():
             "drift_limit": float(drift_limit),
             "snapshot_limit": float(snapshot_limit),
             "alpha": float(alpha),
+            "line_search": bool(meta.get("line_search", False)),
             "dt_hist": meta.get("dt_hist", []),
             "amps_g_used": meta.get("amps_g_used", []),
         }
@@ -953,17 +1411,27 @@ def main():
             integrator=args.integrator,
             H=3.0,
             L=5.0,
-            T0=0.5,
-            zeta=0.02,
+            T0=float(args.T0),
+            zeta=float(args.zeta),
             drift_limit=drift_limit,
-            amps_g=np.arange(0.1, 2.1, 0.1),
-            t_end=10.0,
-            base_dt=0.002,
-            dt_min=0.00025,
+            amps_g=np.arange(float(args.ag_min), float(args.ag_max) + 0.5*float(args.ag_step), float(args.ag_step)),
+            t_end=float(args.t_end),
+            base_dt=float(args.base_dt),
+            dt_min=float(args.dt_min),
             alpha=alpha,
             nseg=nseg,
             nlgeom=nlgeom,
+            max_iter=int(args.max_iter),
+            tol=float(args.tol),
+            gravity_steps=int(args.gravity_steps),
+            gravity_max_iter=int(args.gravity_max_iter),
+            gravity_tol=float(args.gravity_tol),
+            gravity_verbose=bool(args.gravity_verbose),
+            debug_cutback=bool(args.debug_cutback),
+            line_search=bool(args.line_search),
             beam_hinge=args.beam_hinge,
+            fiber_ny=int(getattr(args, "fiber_ny", 20)),
+            fiber_nz=int(getattr(args, "fiber_nz", 14)),
         )
         plot_results(last, model, meta, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out)
         _write_basic_plots(out, last)
@@ -981,17 +1449,27 @@ def main():
         integrator=args.integrator,
         H=3.0,
         L=5.0,
-        T0=0.5,
-        zeta=0.02,
+        T0=float(args.T0),
+        zeta=float(args.zeta),
         drift_limit=drift_limit,
-        amps_g=np.arange(0.1, 2.1, 0.1),
-        t_end=10.0,
-        base_dt=0.002,
-        dt_min=0.00025,
+        amps_g=np.arange(float(args.ag_min), float(args.ag_max) + 0.5*float(args.ag_step), float(args.ag_step)),
+        t_end=float(args.t_end),
+        base_dt=float(args.base_dt),
+        dt_min=float(args.dt_min),
         alpha=alpha,
         nseg=nseg,
         nlgeom=nlgeom,
+        max_iter=int(args.max_iter),
+        tol=float(args.tol),
+        gravity_steps=int(args.gravity_steps),
+        gravity_max_iter=int(args.gravity_max_iter),
+        gravity_tol=float(args.gravity_tol),
+        gravity_verbose=bool(args.gravity_verbose),
+        debug_cutback=bool(args.debug_cutback),
         beam_hinge="shm",
+        line_search=bool(getattr(args, "line_search", False)),
+        fiber_ny=int(getattr(args, "fiber_ny", 20)),
+        fiber_nz=int(getattr(args, "fiber_nz", 14)),
     )
     plot_results(last_shm, model_shm, meta_shm, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out_shm)
     _write_basic_plots(out_shm, last_shm)
@@ -1002,17 +1480,27 @@ def main():
         integrator=args.integrator,
         H=3.0,
         L=5.0,
-        T0=0.5,
-        zeta=0.02,
+        T0=float(args.T0),
+        zeta=float(args.zeta),
         drift_limit=drift_limit,
-        amps_g=np.arange(0.1, 2.1, 0.1),
-        t_end=10.0,
-        base_dt=0.002,
-        dt_min=0.00025,
+        amps_g=np.arange(float(args.ag_min), float(args.ag_max) + 0.5*float(args.ag_step), float(args.ag_step)),
+        t_end=float(args.t_end),
+        base_dt=float(args.base_dt),
+        dt_min=float(args.dt_min),
         alpha=alpha,
         nseg=nseg,
         nlgeom=nlgeom,
+        max_iter=int(args.max_iter),
+        tol=float(args.tol),
+        gravity_steps=int(args.gravity_steps),
+        gravity_max_iter=int(args.gravity_max_iter),
+        gravity_tol=float(args.gravity_tol),
+        gravity_verbose=bool(args.gravity_verbose),
+        debug_cutback=bool(args.debug_cutback),
         beam_hinge="fiber",
+        line_search=bool(getattr(args, "line_search", False)),
+        fiber_ny=int(getattr(args, "fiber_ny", 20)),
+        fiber_nz=int(getattr(args, "fiber_nz", 14)),
     )
     plot_results(last_fib, model_fib, meta_fib, drift_limit=drift_limit, snapshot_limit=snapshot_limit, outdir=out_fib)
     _write_basic_plots(out_fib, last_fib)

@@ -30,6 +30,16 @@ class FrameElementLinear2D:
     I: float
     nodes: List[Node]
 
+    # Beam theory
+    # - "euler": Euler–Bernoulli (no shear deformation)
+    # - "timoshenko": includes shear deformation via kappa*G*A shear stiffness
+    beam_theory: str = "timoshenko"
+
+    # Shear properties for Timoshenko
+    nu: float = 0.2          # Poisson's ratio (used to compute G if G is None)
+    kappa: float = 5.0 / 6.0 # shear correction factor
+    G: float | None = None   # shear modulus; if None, computed from E and nu
+
     def _geom(self) -> Tuple[float, float, float]:
         xi, yi = self.nodes[self.ni].x, self.nodes[self.ni].y
         xj, yj = self.nodes[self.nj].x, self.nodes[self.nj].y
@@ -49,17 +59,37 @@ class FrameElementLinear2D:
     def k_local(self) -> np.ndarray:
         L, _, _ = self._geom()
         E, A, I = self.E, self.A, self.I
+
         k = np.zeros((6, 6))
+
+        # axial (same for Euler/Timoshenko)
         k_ax = E * A / L
         k[0, 0] = k_ax
         k[0, 3] = -k_ax
         k[3, 0] = -k_ax
         k[3, 3] = k_ax
 
-        k11 = 12 * E * I / (L ** 3)
-        k12 = 6 * E * I / (L ** 2)
-        k22 = 4 * E * I / L
-        k22b = 2 * E * I / L
+        theory = (self.beam_theory or "euler").lower().strip()
+        if theory in ("timo", "timoshenko", "shear"):
+            # Timoshenko bending-shear stiffness
+            # phi = 12EI / (kappa*G*A*L^2)
+            G = self.G if self.G is not None else (E / (2.0 * (1.0 + float(self.nu))))
+            As = float(self.kappa) * A
+            if As <= 0.0 or G <= 0.0:
+                raise ValueError("Timoshenko requires positive shear stiffness (kappa*A and G).")
+
+            phi = 12.0 * E * I / (G * As * (L ** 2))
+
+            k11 = 12.0 * E * I / ((L ** 3) * (1.0 + phi))
+            k12 = 6.0 * E * I / ((L ** 2) * (1.0 + phi))
+            k22 = (4.0 + phi) * E * I / (L * (1.0 + phi))
+            k22b = (2.0 - phi) * E * I / (L * (1.0 + phi))
+        else:
+            # Euler–Bernoulli bending stiffness
+            k11 = 12.0 * E * I / (L ** 3)
+            k12 = 6.0 * E * I / (L ** 2)
+            k22 = 4.0 * E * I / L
+            k22b = 2.0 * E * I / L
 
         k[1, 1] = k11
         k[1, 2] = k12
@@ -77,6 +107,7 @@ class FrameElementLinear2D:
         k[5, 2] = k22b
         k[5, 4] = -k12
         k[5, 5] = k22
+
         return k
 
     def k_geo_local(self, N: float) -> np.ndarray:
@@ -110,6 +141,7 @@ class FrameElementLinear2D:
         k_l = self.k_local()
         f_l = k_l @ u_l
 
+        # Material (Timoshenko) contribution
         k_g = T.T @ k_l @ T
         f_g = T.T @ f_l
 
@@ -121,6 +153,11 @@ class FrameElementLinear2D:
         if include_geo:
             k_geo_l = self.k_geo_local(N_tension)
             k_g += T.T @ k_geo_l @ T
+
+            # Consistent internal force contribution for the geometric stiffness.
+            # Note: this is the small-displacement P-Delta approximation where
+            # the (initial stress) geometric stiffness is treated as linear in u.
+            f_g += T.T @ (k_geo_l @ u_l)
 
         return dofs, k_g, f_g, {"N": float(N_tension)}
 

@@ -340,7 +340,7 @@ def build_model(data: ModelData, nlgeom: bool = False) -> Model:
         _, b, h, _ = section
         A = b * h
         I = b * (h ** 3) / 12.0
-        beams.append(FrameElementLinear2D(n1i, n2i, E=data.material.E, A=A, I=I, nodes=nodes))
+        beams.append(FrameElementLinear2D(n1i, n2i, E=data.material.E, A=A, I=I, nodes=nodes, nu=data.material.nu))
 
     nd = dm.ndof
     mass = np.zeros(nd)

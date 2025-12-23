@@ -56,12 +56,51 @@ class Model:
         R = np.zeros(nd)
         info = {"hinges": []}
 
+        # Collect trial axial forces (tension-positive convention) for each frame element.
+        # These are used to provide physically meaningful N_target values to fiber beam hinges.
+        N_beam_trial: List[float] = []
+
         for e in self.beams:
-            dofs, k_g, f_g, _ = e.stiffness_and_force_global(u_trial, include_geo=self.nlgeom)
+            dofs, k_g, f_g, meta = e.stiffness_and_force_global(u_trial, include_geo=self.nlgeom)
+            N_beam_trial.append(float(meta.get("N", 0.0)))
             for a, ia in enumerate(dofs):
                 R[ia] += f_g[a]
                 for b, ib in enumerate(dofs):
                     K[ia, ib] += k_g[a, b]
+
+
+        # Update hinge axial coupling from associated frame element axial force (tension-positive convention).
+        # - Fiber hinges want N_target in compression-positive convention -> beam_sign=-1 by default.
+        # - SHM beam hinges optionally reduce My under axial compression via N_comp_current.
+        for h in self.hinges:
+            # Dedicated fiber spring element (preferred)
+            if isinstance(h, FiberRotSpringElement) and h.beam_idx is not None:
+                bi = int(h.beam_idx)
+                if 0 <= bi < len(N_beam_trial):
+                    N_tension = float(N_beam_trial[bi])
+                    h._beam_N_tension = N_tension
+                    h.hinge.N_target = float(h.beam_sign) * N_tension
+
+            # Compat mode: RotSpringElement can also host beam_shm / beam_fiber with beam_idx
+            if isinstance(h, RotSpringElement) and h.beam_idx is not None:
+                bi = int(h.beam_idx)
+                if 0 <= bi < len(N_beam_trial):
+                    N_tension = float(N_beam_trial[bi])
+                    h._beam_N_tension = N_tension
+                    kind = str(getattr(h, "kind", "")).lower().strip()
+
+                    # beam_shm: update compression-positive axial force for My(N)
+                    if kind == "beam_shm" and getattr(h, "beam_hinge", None) is not None:
+                        N_comp = max(0.0, float(getattr(h, "beam_sign", -1.0)) * float(N_tension))
+                        setattr(h.beam_hinge, "N_comp_current", float(N_comp))
+
+                    # beam_fiber compat: update fiber N_target if present
+                    if kind in ("beam_fiber", "fiber"):
+                        fh = getattr(h, "fiber_hinge", None)
+                        if fh is None:
+                            fh = getattr(h, "beam_hinge", None)
+                        if fh is not None and hasattr(fh, "N_target"):
+                            setattr(fh, "N_target", float(getattr(h, "beam_sign", -1.0)) * float(N_tension))
 
         for h in self.hinges:
             k_l, f_l, inf = h.eval_trial(u_trial, u_comm)
@@ -84,7 +123,8 @@ class Model:
         nd = self.ndof()
         R = np.zeros(nd)
         for e in self.beams:
-            dofs, _, f_g, _ = e.stiffness_and_force_global(u, include_geo=False)
+            # Keep base reactions consistent with the model's NLGEOM setting.
+            dofs, _, f_g, _ = e.stiffness_and_force_global(u, include_geo=bool(self.nlgeom))
             for a, ia in enumerate(dofs):
                 R[ia] += f_g[a]
         for h in self.hinges:
@@ -101,7 +141,7 @@ class Model:
         nd = self.ndof()
         R = np.zeros(nd)
         for e in self.beams:
-            dofs, _, f_g, _ = e.stiffness_and_force_global(u, include_geo=False)
+            dofs, _, f_g, _ = e.stiffness_and_force_global(u, include_geo=bool(self.nlgeom))
             for a, ia in enumerate(dofs):
                 R[ia] += f_g[a]
         for h in self.hinges:

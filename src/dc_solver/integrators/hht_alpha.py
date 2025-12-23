@@ -65,9 +65,12 @@ def _compute_drift(
 
 
 def _solve_gravity_initialization(
-    model: Model, 
-    nd: int, 
-    fd: np.ndarray
+    model: Model,
+    nd: int,
+    fd: np.ndarray,
+    *,
+    line_search: bool = False,
+    ls_max: int = 12,
 ) -> np.ndarray:
     """
     Performs a static analysis to resolve initial gravity loads 
@@ -95,7 +98,26 @@ def _solve_gravity_initialization(
 
         # Solve for increment
         du = np.linalg.solve(K + EPS_REG * np.eye(nf), res)
-        u_free += du
+        if line_search:
+            res0 = float((res @ res) ** 0.5)
+            alpha = 1.0
+            accepted = False
+            for _ in range(int(ls_max)):
+                u_try = u.copy()
+                u_try[fd] = u_free + alpha * du
+                model.update_column_yields(u_try)
+                _K, _Rint, _ = model.assemble(u_try, u)
+                res_try = model.load_const[fd] - _Rint
+                n_try = float((res_try @ res_try) ** 0.5)
+                if n_try <= (1.0 - 1e-4 * alpha) * res0:
+                    u_free = u_try[fd].copy()
+                    accepted = True
+                    break
+                alpha *= 0.5
+            if not accepted:
+                u_free += 0.25 * du
+        else:
+            u_free += du
 
     raise RuntimeError("Gravity initialization step failed to converge.")
 
@@ -113,6 +135,8 @@ def hht_alpha_newton(
     max_iter: int = 40,
     tol: float = 1e-6,
     verbose: bool = False,
+    line_search: bool = False,
+    ls_max: int = 12,
     u0: Optional[np.ndarray] = None,
     v0: Optional[np.ndarray] = None,
     load_hist: Optional[np.ndarray] = None,
@@ -121,8 +145,11 @@ def hht_alpha_newton(
 ) -> Dict[str, Any]:
     
     solve_start = time.perf_counter()
-    model.reset_state()
-    
+
+    # Reset only for a fresh start (no provided initial conditions).
+    if u0 is None and v0 is None:
+        model.reset_state()
+
     # --- 1. Setup & Pre-calculation ---
     nd = model.ndof()
     fd = model.free_dofs()
@@ -159,7 +186,7 @@ def hht_alpha_newton(
     # --- 2. Initial State Determination ---
     if u0 is None and v0 is None:
         # Static Gravity Solve
-        u_n = _solve_gravity_initialization(model, nd, fd)
+        u_n = _solve_gravity_initialization(model, nd, fd, line_search=bool(line_search), ls_max=int(ls_max))
         v_n = np.zeros(nd)
         # For a static start, acceleration is zero unless external forces are unbalanced immediately
         a_n = np.zeros(nd) 
@@ -279,7 +306,35 @@ def hht_alpha_newton(
             except np.linalg.LinAlgError:
                 du = np.linalg.lstsq(mat, res, rcond=None)[0]
 
-            u_free += du
+            if line_search:
+                res0 = float((res @ res) ** 0.5)
+                alpha_ls = 1.0
+                accepted = False
+                for _ in range(int(ls_max)):
+                    u_free_try = u_free + alpha_ls * du
+                    u_trial_ls = u_comm_step.copy()
+                    u_trial_ls[fd] = u_free_try
+
+                    # assemble trial residual
+                    K_ls, Rint_ls, _inf_ls = model.assemble(u_trial_ls, u_comm_step)
+                    a_ls = hht.a0 * (u_trial_ls - u_pred)
+                    v_ls = v_pred + (hht.gamma * dt) * a_ls
+
+                    inertial_ls = M_diag[fd] * a_ls[fd]
+                    damping_ls = C_diag[fd] * v_ls[fd]
+                    restoring_ls = (1.0 + hht.alpha) * Rint_ls - hht.alpha * Rint_n
+                    res_ls = p_alpha[fd] - (restoring_ls + damping_ls + inertial_ls)
+                    n_ls = float((res_ls @ res_ls) ** 0.5)
+
+                    if n_ls <= (1.0 - 1e-4 * alpha_ls) * res0:
+                        u_free = u_free_try
+                        accepted = True
+                        break
+                    alpha_ls *= 0.5
+                if not accepted:
+                    u_free += 0.25 * du
+            else:
+                u_free += du
 
             if reporter:
                 _report_iteration(reporter, step_id, n, it, res_norm, res, fd, du)

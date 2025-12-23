@@ -20,6 +20,51 @@ GRAVITY_MAX_ITER = 80
 EPS_REG = 1e-14
 
 
+def estimate_explicit_dt_crit(model: Model, u_ref: Optional[np.ndarray] = None) -> float:
+    """Estimate a critical explicit time step for the current model.
+
+    Uses the largest eigenvalue of M^{-1}K (free DOFs) computed from a tangent
+    stiffness K assembled at the reference configuration u_ref.
+
+    Returns
+    -------
+    dt_crit : float
+        Approximate critical step size for central difference / Velocity-Verlet
+        integration: dt_crit ≈ 2 / ω_max.
+    """
+    nd = model.ndof()
+    fd = model.free_dofs()
+    nf = fd.size
+    if nf == 0:
+        return float("inf")
+
+    if u_ref is None:
+        u_ref = np.zeros(nd, dtype=float)
+
+    # Assemble tangent at the reference state
+    K, _, _ = model.assemble(u_ref, u_ref)
+
+    M = np.asarray(model.mass_diag[fd], dtype=float)
+    # Avoid divide-by-zero (constrained DOFs are removed already)
+    M = np.where(M > 0.0, M, 1.0)
+
+    # Form symmetric matrix A = D^{-1/2} K D^{-1/2} whose eigenvalues are ω^2
+    inv_sqrt_M = 1.0 / np.sqrt(M)
+    A = (inv_sqrt_M[:, None] * K) * inv_sqrt_M[None, :]
+    A = 0.5 * (A + A.T)  # numerical symmetry
+    try:
+        lam = np.linalg.eigvalsh(A)
+    except np.linalg.LinAlgError:
+        return float("nan")
+
+    lam_max = float(np.max(lam)) if lam.size else 0.0
+    if not np.isfinite(lam_max) or lam_max <= 0.0:
+        return float("inf")
+
+    omega_max = float(np.sqrt(lam_max))
+    return 2.0 / omega_max
+
+
 def _compute_drift(
     u: np.ndarray,
     roof_nodes: Tuple[int, int],
@@ -105,8 +150,10 @@ def explicit_verlet(
     """
     solve_start = time.perf_counter()
 
-    model.reset_state()
-    
+    # Reset only for a fresh start (no provided initial conditions).
+    if u0 is None and v0 is None:
+        model.reset_state()
+
     # --- 1. Setup ---
     nd = model.ndof()
     fd = model.free_dofs()
@@ -119,9 +166,6 @@ def explicit_verlet(
     M_diag = model.mass_diag
     C_diag = model.C_diag
     dt = float(t[1] - t[0])
-
-    if verbose:
-        print(f"[EXPLICIT] steps={t.size - 1} dt={dt:.6f}s (Velocity Verlet)")
 
     # Validate Mass
     # In explicit methods, M must be invertible (diagonal > 0) for all free DOFs.
@@ -154,6 +198,22 @@ def explicit_verlet(
         u_n = np.zeros(nd) if u0 is None else u0.copy()
         v_n = np.zeros(nd) if v0 is None else v0.copy()
 
+    # --- 2b. Stability / substepping (keeps the external time grid intact) ---
+    dt_crit = estimate_explicit_dt_crit(model, u_ref=u_n)
+    safety = 0.90
+    n_sub = 1
+    if np.isfinite(dt_crit) and dt_crit > 0.0:
+        n_sub = int(np.ceil(dt / (safety * dt_crit)))
+        n_sub = max(1, n_sub)
+    dt_sub = dt / float(n_sub)
+
+    if verbose:
+        msg = f"[EXPLICIT] steps={t.size - 1} dt={dt:.6f}s"
+        if np.isfinite(dt_crit):
+            msg += f" dt_crit~{dt_crit:.6e}s n_sub={n_sub} dt_sub={dt_sub:.6e}s"
+        msg += " (Velocity Verlet)"
+        print(msg)
+
     # Calculate initial acceleration a_0 = M^-1 * (P - I - C*v)
     model.update_column_yields(u_n)
     Rint0 = model.internal_force(u_n)
@@ -178,46 +238,46 @@ def explicit_verlet(
     # --- 3. Time Stepping Loop ---
     
     for n in range(n_steps - 1):
-        model.update_column_yields(u_n)
-
         if reporter:
             reporter(IncrementStart(step_id=step_id, inc=n + 1, attempt=1, dt=dt))
 
-        # --- A. First Half-Step (Predictor) ---
-        # v_half = v_n + dt/2 * a_n
-        v_half = v_n + 0.5 * dt * a_n
-        
-        # u_{n+1} = u_n + dt * v_half
-        u_np1 = u_n + dt * v_half
+        inf_last: Dict[str, Any] = {}
 
-        # --- B. Internal Force Evaluation ---
-        # Note: assemble returns forces on Free DOFs only
-        _, Rint_f, inf = model.assemble(u_np1, u_n)
-        
-        Rint_np1 = np.zeros(nd)
-        Rint_np1[fd] = Rint_f
+        # Substep integration over [t_n, t_{n+1}] using linear interpolation
+        # of the input record (ag) and optional external load history.
+        for j in range(n_sub):
+            model.update_column_yields(u_n)
 
-        # --- C. Second Half-Step (Corrector) ---
-        p_np1 = model.load_const + load_hist[n + 1] - M_diag * r * ag[n + 1]
+            frac = float(j + 1) / float(n_sub)
+            ag_end = float(ag[n] + frac * (ag[n + 1] - ag[n]))
 
-        # Solve M * a_{n+1} = P_{n+1} - R_{int, n+1} - C * v_{n+1/2}
-        # Note: Using v_half for damping is a standard explicit approximation 
-        # to decouple the velocity update.
-        a_np1 = np.zeros(nd)
-        numerator = (
-            p_np1[mass_mask] 
-            - Rint_np1[mass_mask] 
-            - C_diag[mass_mask] * v_half[mass_mask]
-        )
-        a_np1[mass_mask] = numerator / M_diag[mass_mask]
+            if load_hist is None:
+                load_end = np.zeros(nd)
+            else:
+                load_end = load_hist[n] + frac * (load_hist[n + 1] - load_hist[n])
 
-        # v_{n+1} = v_{n+1/2} + dt/2 * a_{n+1}
-        v_np1 = v_half + 0.5 * dt * a_np1
+            # --- A. First Half-Step (Predictor) ---
+            v_half = v_n + 0.5 * dt_sub * a_n
+            u_np1 = u_n + dt_sub * v_half
 
-        # --- D. Finalize Step ---
-        model.commit()
+            # --- B. Internal Force Evaluation ---
+            _, Rint_f, inf_last = model.assemble(u_np1, u_n)
+            Rint_np1 = np.zeros(nd)
+            Rint_np1[fd] = Rint_f
 
-        u_n, v_n, a_n = u_np1, v_np1, a_np1
+            # --- C. Second Half-Step (Corrector) ---
+            p_end = model.load_const + load_end - M_diag * r * ag_end
+            a_np1 = np.zeros(nd)
+            numerator = (
+                p_end[mass_mask]
+                - Rint_np1[mass_mask]
+                - C_diag[mass_mask] * v_half[mass_mask]
+            )
+            a_np1[mass_mask] = numerator / M_diag[mass_mask]
+            v_np1 = v_half + 0.5 * dt_sub * a_np1
+
+            model.commit()
+            u_n, v_n, a_n = u_np1, v_np1, a_np1
 
         # Record History
         u_hist[n + 1] = u_n
@@ -225,7 +285,7 @@ def explicit_verlet(
         a_hist[n + 1] = a_n
         drift_hist[n + 1] = _compute_drift(u_n, drift_nodes, drift_height, model, base_nodes)
         vb_hist[n + 1] = model.base_shear(u_n, base_nodes=base_nodes)
-        hinge_hist.append(inf.get("hinges", []))
+        hinge_hist.append(inf_last.get("hinges", []))
 
         # Snapshot Logic
         current_drift_abs = abs(drift_hist[n + 1])
@@ -266,6 +326,9 @@ def explicit_verlet(
         "iters": iters_hist,
         "hinges": hinge_hist,
         "dt": dt,
+        "dt_sub": float(dt_sub),
+        "dt_crit_est": float(dt_crit) if np.isfinite(dt_crit) else float("nan"),
+        "n_substeps": int(n_sub),
         "n_steps": iters_hist.size,
         "iters_total": 0, # Explicit has 0 iterations
         "solve_time_s": solve_time_s,

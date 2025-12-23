@@ -1,232 +1,227 @@
-# Dinámica Computacional — pórtico + rótulas plásticas (N–M) + fibras
+# Dinámica Computacional — 2D frame solver (plastic hinges + fiber sections)
 
-Este repo contiene un solver estructural 2D (frame) con:
-- rótulas elasto-plásticas **acopladas N–M** (superficie poligonal + return mapping),
-- rótula tipo **SHM** para vigas (histeresis degradada),
-- y un **Problema 5** para construir la curva de interacción N–M desde una **sección de fibras 2D**.
+This repository contains a compact 2D **frame** (beam/column) solver aimed at reproducible structural dynamics experiments.
 
-Incluye integración en el tiempo con selección por CLI:
+## Features
 
-- `hht` (HHT-α, default)
-- `newmark` (Newmark-β)
-- `explicit` (Velocity Verlet)
+- **Coupled N–M plastic hinge** (polygonal yield surface + return mapping)
+- **SHM beam hinge** (degrading hysteresis model for beam ends)
+  - The SHM implementation auto-scales the Bouc–Wen parameter `A` (when `bw_A <= 0`) so the **elastic-range tangent** is
+    approximately **K0** (otherwise the hinge can become unrealistically soft in gravity).
+- **RC fiber-section hinge** (2D fiber discretization) used to generate N–M interaction and realistic hysteresis
+- Time integration (CLI-selectable):
+  - `hht` (HHT-α, default)
+  - `newmark` (Newmark-β)
+  - `explicit` (Velocity Verlet, with automatic stability substepping)
 
-> Salidas: por defecto se guardan en `./outputs/`.
+Outputs are written under `./outputs/` by default.
+
+> For convergence issues (Newton / dt cutbacks / fiber hinge), see **`DEBUG_CHECKLIST.md`**.
 
 ---
 
-## Instalación rápida
+## Install
 
-Recomendado (editable install):
+Recommended (editable install):
 
 ```bash
 python -m pip install -U pip
 python -m pip install -e .
 ```
 
-Alternativa (sin instalar): varios scripts en `src/problems/` se pueden ejecutar directo con `python src/problems/...py`.
+Alternative (without installing): run scripts directly from `src/problems/` using `PYTHONPATH=src`.
 
 ---
 
-## Integradores (HHT / Newmark / Explicit)
+## Run the problems
 
-En los problemas dinámicos y en el runner, usa:
-
-```bash
---integrator hht
---integrator newmark
---integrator explicit
-```
-
-Ejemplos:
-
-```bash
-python -m problems.problema4_portico --integrator hht
-python -m problems.problema4_portico --integrator newmark
-python -m problems.problema4_portico --integrator explicit
-```
-
-Runner genérico:
-
-```bash
-python -m dc_solver.run inputs/portal_frame.inp --integrator newmark
-```
-
----
-
-## Ejecutar problemas
-
-### Problema 2 — rótula N–M (axial / flexión / combinado)
+### Problem 2 — N–M hinge verification
 
 ```bash
 python src/problems/problema2_interaccion.py
 python src/problems/problema2_hinge_nm_verification.py
 ```
 
-Exporta automáticamente:
-- `problem2_*_paths*.png` (trayectorias N–M)
-- `problem2_*_hysteresis*.png` (M–θ y N–ε)
-- versiones `_gradient.png` con **gradiente de color por step** (para ver el tiempo).
+Typical exports:
+- N–M paths
+- M–θ and N–ε hysteresis
+- `_gradient.png` versions with a step/time color gradient
 
-> En **flexión pura** se controla `N≈0` resolviendo `Δε` por bisección (evita serrucho artificial por restricción axial).
+### Problem 4 — portal frame (gravity preload + dynamic IDA)
 
-### Problema 4 — pórtico (time-history) con rótulas
-
-```bash
-python -m problems.problema4_portico --integrator hht
-```
-
-Exporta:
-- drift vs tiempo, Vb vs drift
-- estados (U/S) en varios snapshots
-- `problem4_hinge_hysteresis_gradient.png` + CSVs por rótula seleccionada
-  (gradiente de color por **t [s]**)
-
-### Problema 5 — sección RC por fibras 2D → curva N–M
+**Default mode is `--state ida`**: the script runs **Step 1** gravity preload, then **Step 2** incremental dynamic analysis (IDA).
 
 ```bash
-python -m problems.problema5_fiber_section_interaction
+PYTHONPATH=src python -m problems.problema4_portico --integrator hht --beam-hinge fiber
 ```
 
-Asume:
-- acero **A420** (fy=420 MPa)
-- hormigón **C20/25** (fc≈20 MPa)
+Modes:
+- `--state gravity` (or `--gravity`): Step 1 only (gravity preload)
+- `--state ida` (default): Step 1 + Step 2 (IDA)
 
-y genera malla 2D de fibras + interacción N–M (convex hull).
+Gravity only:
+
+```bash
+PYTHONPATH=src python -m problems.problema4_portico --beam-hinge fiber --gravity
+```
+
+When you run gravity-only, the script writes `gravity_compare.txt` which now includes a **gravity load check**:
+- confirms the gravity load is a **distributed self-weight on all frame elements (columns + roof beam)**, computed from the **physical member areas** (A_col/A_beam) and member lengths (same as the Problem 6 elastic reference)
+- prints `sum(Fy)+P` as a quick verification (should be ~0)
+
+For fiber beam hinges, a small debug file is also written:
+- `fiber_hinge_axial_debug.txt` (axial-force coupling used by the fiber hinges: `N_beam_tension` and `N_target_used`)
+
+Compare SHM vs fiber hinge (runs both):
+
+```bash
+PYTHONPATH=src python -m problems.problema4_portico --beam-hinge compare
+```
+
+Key options:
+- `--integrator {hht,newmark,explicit}`
+- `--nlgeom` enables geometric nonlinearity (P-Δ)
+- IDA amplitude range (in g): `--ag-min`, `--ag-max`, `--ag-step`
+- Time-step controls: `--base-dt`, `--dt-min`
+- Newton controls: `--max-iter`, `--tol`
+
+Notes:
+- All frame (beam/column) elements use a **Timoshenko** formulation by default.
+- With `--nlgeom`, a **P-Δ (geometric stiffness)** contribution is included consistently in both the tangent stiffness
+  and the internal force evaluation.
+- For `--integrator explicit`, the solver estimates a critical explicit step (`dt_crit`) from the current tangent and
+  automatically substeps each output step (reported as `dt_sub`, `n_substeps`) when needed.
+
+SHM hinge note:
+- The SHM beam hinge auto-scales the Bouc–Wen parameter `A` (when `bw_A <= 0`) so the **initial tangent stiffness** is
+  approximately the desired elastic stiffness `K0` (avoids an overly soft elastic range).
+
+#### Line search (recommended for fiber + implicit)
+
+Backtracking line search is **disabled by default** and is only enabled when you pass `--line-search`.
+When enabled, it applies to:
+- Step 1 gravity preload (Newton)
+- Step 2 implicit dynamics (HHT/Newmark Newton corrector)
+- Fiber hinge local solve (the internal N≈0 constraint solve)
+
+```bash
+PYTHONPATH=src python -m problems.problema4_portico --beam-hinge fiber --integrator hht --line-search
+```
+
+Fiber discretization (only used when `--beam-hinge fiber` or `compare`):
+
+```bash
+PYTHONPATH=src python -m problems.problema4_portico --beam-hinge fiber --fiber-ny 24 --fiber-nz 18
+```
+
+### Problem 5 — RC fiber section → N–M interaction
+
+```bash
+PYTHONPATH=src python -m problems.problema5_fiber_section_interaction
+```
 
 ---
 
-## Ejecutar todo (2–3–4–5)
+## Outputs and logs (Abaqus-like)
+
+Each run writes into its output directory:
+
+- `journal.log` — chronological log (console + key events)
+- `<jobname>.msg` — message file (warnings/errors, exceptions)
+- `<jobname>.sta` — status file (step progress)
+- `<jobname>.dat` — data summary file
+- `run_info.json` / `run_info.txt` — run metadata snapshot
+
+The console prints `JOB START` / `JOB END` blocks including wall/CPU time, FLOPs estimate, and a list of newly created files.
+
+See: `examples/demo_job_infrastructure.py`.
+
+---
+
+## Troubleshooting (quick)
+
+### “COLLAPSE (dt<dtmin)” during IDA
+
+This means the analysis had to cut back the time step repeatedly (non-convergence) until `dt` fell below `--dt-min`.
+
+Try (in this order):
+
+1) Enable line search:
 
 ```bash
-python -m problems.run_all_problems_2_3_4
+PYTHONPATH=src python -m problems.problema4_portico --beam-hinge fiber --integrator hht --line-search
+```
+
+2) Increase Newton iterations:
+
+```bash
+... --max-iter 80
+```
+
+3) Start with a smaller base dt and/or allow smaller dt-min:
+
+```bash
+... --base-dt 0.001 --dt-min 0.000125
+```
+
+4) Print cutback diagnostics:
+
+```bash
+... --debug-cutback
+```
+
+For a full step-by-step checklist, see **`DEBUG_CHECKLIST.md`**.
+
+
+### “Gravity-only Newton did not converge”
+
+If you run gravity preload only:
+
+```bash
+PYTHONPATH=src python -m problems.problema4_portico --beam-hinge fiber --gravity
+```
+
+and you get a non-convergence error, the solver will automatically attempt **adaptive load substepping** (smaller gravity increments) by default.
+If it still fails, try (in this order):
+
+1) Enable line search:
+
+```bash
+... --line-search
+```
+
+2) Increase gravity iterations:
+
+```bash
+... --gravity-max-iter 120
+```
+
+3) Ramp gravity more smoothly:
+
+```bash
+... --gravity-steps 20
+```
+
+4) Enable verbose gravity output to see the substepping and residuals:
+
+```bash
+... --gravity-verbose
+```
+
+### Numba / JIT issues
+
+Optional speedups exist behind an environment variable.
+To disable JIT during debugging:
+
+```bash
+DC_USE_NUMBA=0 PYTHONPATH=src python -m problems.problema4_portico --integrator explicit
 ```
 
 ---
 
-## Estructura (alto nivel)
+## Repository layout (high level)
 
-- `plastic_hinge/` : return mapping 2D + superficie poligonal N–M
-- `src/dc_solver/` : FEM + integradores + post-proceso
-- `src/problems/`  : scripts reproducibles por problema
----
+- `plastic_hinge/` : N–M hinge return mapping + fiber section tools
+- `src/dc_solver/` : FEM core, integrators, post-processing, job/reporting
+- `src/problems/`  : reproducible problem scripts
 
-## Aceleración opcional con Numba (JIT)
-
-Si instalas **Numba**, se aceleran kernels numéricos que están en el hot-path:
-
-- proyección / return mapping de la rótula N–M (`plastic_hinge/return_mapping.py`)
-- integración de secciones por fibras (`plastic_hinge/fiber_section.py`)
-
-Instalación (Python ≥ 3.10 recomendado):
-
-```bash
-python -m pip install -e ".[numba]"
-```
-
-Desactivar JIT (por si estás debuggeando o si Numba no anda bien en tu plataforma):
-
-- PowerShell:
-  ```powershell
-  $env:DC_USE_NUMBA="0"
-  python -m problems.problema4_portico --integrator explicit
-  ```
-- Bash:
-  ```bash
-  DC_USE_NUMBA=0 python -m problems.problema4_portico --integrator explicit
-  ```
-
----
-
-## Job Infrastructure & Reporting (Estilo Abaqus/CalculiX)
-
-El repo ahora incluye infraestructura profesional de "JOB" con reporting robusto, inspirado en Abaqus, CalculiX y SAP2000.
-
-### Características
-
-- **JobRunner context manager**: orquesta todo el ciclo de vida de un análisis
-- **Tracking de archivos**: detecta automáticamente todos los outputs generados
-- **Verbosidad estilo Abaqus**: bloques `JOB START` / `JOB END` con métricas
-- **Archivos de salida estándar**:
-  - `.msg` — mensajes, warnings, iteraciones
-  - `.sta` — status incremental (step/inc/time/dt)
-  - `.dat` — resumen final + **JOB TOTALS** (CPU, FLOPs, etc.)
-  - `journal.log` — log cronológico de eventos
-  - `*_runinfo.json` y `*_runinfo.txt` — metadata completa
-- **Serialización JSON-safe**: maneja automáticamente `np.ndarray`, `Path`, `datetime`, etc.
-- **Estimación de FLOPs**: métricas de performance (GFLOP/s estimado)
-- **Progress printing**: impresión incremental durante análisis largos
-
-### Estructura de Código
-
-```
-src/dc_solver/
-  job/
-    runner.py          # JobRunner (context manager principal)
-    file_tracker.py    # snapshot/diff de archivos
-    journal.py         # journal.log writer
-    console.py         # pretty printing (progress, headers)
-    flops.py           # estimación de FLOPs
-  reporting/
-    run_info.py        # runinfo txt/json + to_jsonable()
-    abaqus_like.py     # writers .msg/.sta/.dat
-    events.py          # event definitions
-  fem/                 # model, nodes, elements
-  integrators/         # hht_alpha, newmark, explicit
-  post/                # plotting, hinge_exports, fiber_mesh_plot
-  materials/           # elastic, etc.
-```
-
-### Ejemplo de Uso
-
-Ver: `examples/demo_job_infrastructure.py`
-
-```python
-from dc_solver.job import JobRunner, print_progress, should_print_progress
-
-with JobRunner(job_name="mi_analisis", output_dir="outputs/run1", meta={...}) as job:
-    # Configurar parámetros para estimación de FLOPs
-    job.set_analysis_params(ndof=300, n_steps=10000, integrator="explicit")
-
-    # Tu análisis aquí...
-    for i in range(n_steps):
-        # ... solve ...
-
-        # Imprimir progreso periódicamente
-        if should_print_progress(i, n_steps, print_every_pct=5.0):
-            print_progress(i, n_steps, t=t_current, dt=dt, drift_peak=drift_max)
-
-    # Marcar éxito
-    job.mark_success()
-```
-
-Al salir del contexto, se generan automáticamente:
-- `.msg`, `.sta`, `.dat`, `journal.log`
-- `mi_analisis_runinfo.json` / `.txt` (con lista de archivos creados)
-- Impresión de **JOB END** con tiempos, FLOPs, y lista de outputs
-
-### Ejecutar el Demo
-
-```bash
-python examples/demo_job_infrastructure.py
-```
-
-Outputs en: `outputs/demo_job/<timestamp>__explicit__sdof/`
-
-### Runinfo JSON-Safe
-
-La función `to_jsonable()` en `reporting/run_info.py` convierte automáticamente:
-
-- `np.ndarray` → `list`
-- `np.float64`, `np.int64` → `float`, `int`
-- `Path` → `str`
-- `datetime` / `date` → isoformat string
-- `set`, `tuple` → `list`
-- `dict` con keys no-string → keys convertidas a `str`
-
-Esto **elimina el error típico**:
-```
-TypeError: Object of type ndarray is not JSON serializable
-```
-
-**Todos** los problemas existentes (2, 3, 4, 5) ya usan `write_run_info()` internamente, que aplica `to_jsonable()` automáticamente.
