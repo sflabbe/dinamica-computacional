@@ -62,9 +62,9 @@ def to_jsonable(obj: Any) -> Any:
         # item() returns a python scalar, but recurse to be safe
         return to_jsonable(item)
 
-    # Path -> str
+    # Path -> str (always use forward slashes for cross-platform consistency)
     if isinstance(obj, Path):
-        return str(obj)
+        return obj.as_posix()
 
     # datetime/date -> isoformat
     if isinstance(obj, datetime):
