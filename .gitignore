@@ -18,12 +18,34 @@ env/
 .spyderproject
 .spyproject
 
-# Outputs
-*.png
-*.pdf
-*.csv
-*.txt
-*.log
-*.xlsx
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Test/linter caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated outputs (allow docs via negation if needed)
+outputs/
+!outputs/profiling/*.md
+!outputs/profiling/README.md
+
+# Profiling artifacts
+prof.out
+scalene*.json
+pstats_*.txt
+*.prof
+
+# Large binary artifacts (use negation if specific ones are needed)
 *.zip
 *.tar.gz
+*.npz
+*.npy
+
+# Generated plots (allow versioned examples via negation if needed)
+# *.png
+# *.pdf

@@ -11,6 +11,14 @@ import numpy as np
 from plastic_hinge import NMSurfacePolygon, PlasticHingeNM, FiberSection2DStateful
 from dc_solver.fem.nodes import Node
 
+# Import JIT kernel for SHM hinge evaluation (guarded by DC_FAST)
+try:
+    from dc_solver.kernels.hinge_jit import shm_bouc_wen_step, is_jit_enabled
+except ImportError:
+    # Fallback if kernels module not available
+    shm_bouc_wen_step = None
+    is_jit_enabled = lambda: False
+
 
 def moment_capacity_from_polygon(surface: NMSurfacePolygon, N: float) -> float:
     """Return max |M| for a given axial N by intersecting the convex polygon with N=const."""
@@ -177,6 +185,40 @@ class SHMBeamHinge1D:
         return float(max(float(self.My_min_frac) * My0, My0 * fac_lin * fac_exp))
 
     def eval_increment(self, dth: float, nsub: int | None = None) -> Tuple[float, float, float, float, float, float]:
+        # Use JIT kernel if available (DC_FAST=1 and numba installed)
+        if shm_bouc_wen_step is not None:
+            # Gather parameters for JIT kernel
+            My0_abs = max(abs(float(self._My0_base())), 1e-12)
+            Eref_dimless = float(self._eref())
+
+            # Ignore nsub parameter when using JIT (kernel determines substeps internally)
+            return shm_bouc_wen_step(
+                dth=float(dth),
+                th_comm=float(self.th_comm),
+                z_comm=float(self.z_comm),
+                a_comm=float(self.a_comm),
+                M_comm=float(self.M_comm),
+                K0_0=float(self.K0_0),
+                My0_abs=My0_abs,
+                alpha_post=float(self.alpha_post),
+                bw_A=float(self.bw_A),
+                bw_beta=float(self.bw_beta),
+                bw_gamma=float(self.bw_gamma),
+                bw_n=float(self.bw_n),
+                b1=float(self.b1),
+                b2=float(self.b2),
+                cK=float(self.cK),
+                cMy=float(self.cMy),
+                K0_min_frac=float(self.K0_min_frac),
+                My_min_frac=float(self.My_min_frac),
+                Eref_dimless=Eref_dimless,
+                pinch=float(self.pinch),
+                theta_pinch=float(self.theta_pinch),
+                dth_sub_max=float(self.dth_sub_max),
+                max_substeps=int(self.max_substeps),
+            )
+
+        # Fallback: original Python implementation
         if nsub is None:
             dmax = float(max(self.dth_sub_max, 1e-12))
             nsub = max(1, int(np.ceil(abs(float(dth)) / dmax)))
