@@ -13,6 +13,9 @@ def _run_static(path: str):
     data = parse_inp(path)
     step = data.steps[0]
     model = build_model(data, nlgeom=step.nlgeom)
+    # Use Euler-Bernoulli theory for analytical comparison
+    for beam in model.beams:
+        beam.beam_theory = "euler"
     if step.cloads:
         apply_cloads(model, data, step)
     u = solve_static_newton(model, model.load_const)

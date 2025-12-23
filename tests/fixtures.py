@@ -38,7 +38,7 @@ def build_two_node_beam(L: float = 2.0,
                         A: float = 0.01,
                         I: float = 1e-4) -> tuple[Model, FrameElementLinear2D]:
     nodes, dm = build_nodes([(0.0, 0.0), (L, 0.0)])
-    element = FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes)
+    element = FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes, beam_theory="euler")
     ndof = dm.ndof
     model = Model(
         nodes=nodes,
@@ -59,7 +59,7 @@ def build_cantilever_model(L: float = 3.0,
                            A: float = 0.01,
                            I: float = 1e-4) -> Model:
     nodes, dm = build_nodes([(0.0, 0.0), (0.0, L)])
-    element = FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes)
+    element = FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes, beam_theory="euler")
     fixed = np.array([*nodes[0].dof_u, nodes[0].dof_th], dtype=int)
     ndof = dm.ndof
     return Model(
@@ -82,9 +82,9 @@ def build_portal_frame_model(L: float = 4.0,
                              I: float = 4e-4) -> Model:
     nodes, dm = build_nodes([(0.0, 0.0), (L, 0.0), (0.0, H), (L, H)])
     elements = [
-        FrameElementLinear2D(0, 2, E=E, A=A, I=I, nodes=nodes),
-        FrameElementLinear2D(1, 3, E=E, A=A, I=I, nodes=nodes),
-        FrameElementLinear2D(2, 3, E=E, A=A, I=I, nodes=nodes),
+        FrameElementLinear2D(0, 2, E=E, A=A, I=I, nodes=nodes, beam_theory="euler"),
+        FrameElementLinear2D(1, 3, E=E, A=A, I=I, nodes=nodes, beam_theory="euler"),
+        FrameElementLinear2D(2, 3, E=E, A=A, I=I, nodes=nodes, beam_theory="euler"),
     ]
     fixed = np.array([
         *nodes[0].dof_u, nodes[0].dof_th,
@@ -111,7 +111,7 @@ def build_sdof_column_model(L: float = 3.0,
                             mass: float = 1.0,
                             damping_ratio: float = 0.0) -> Model:
     nodes, dm = build_nodes([(0.0, 0.0), (0.0, L)])
-    elements = [FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes)]
+    elements = [FrameElementLinear2D(0, 1, E=E, A=A, I=I, nodes=nodes, beam_theory="euler")]
     fixed = np.array([
         *nodes[0].dof_u, nodes[0].dof_th,
         nodes[1].dof_u[1], nodes[1].dof_th,
