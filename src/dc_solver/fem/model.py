@@ -11,6 +11,14 @@ from dc_solver.fem.nodes import Node
 from dc_solver.fem.frame2d import FrameElementLinear2D
 from dc_solver.hinges.models import RotSpringElement, HingeNM2DElement, FiberRotSpringElement
 
+# Import JIT kernel for assembly (guarded by DC_FAST)
+try:
+    from dc_solver.kernels.assemble_jit import assemble_elements, is_jit_enabled
+except ImportError:
+    # Fallback if kernels module not available
+    assemble_elements = None
+    is_jit_enabled = lambda: False
+
 
 @dataclass
 class Model:
@@ -57,16 +65,39 @@ class Model:
         info = {"hinges": []}
 
         # Collect trial axial forces (tension-positive convention) for each frame element.
-        # These are used to provide physically meaningful N_target values to fiber beam hinges.
         N_beam_trial: List[float] = []
 
-        for e in self.beams:
-            dofs, k_g, f_g, meta = e.stiffness_and_force_global(u_trial, include_geo=self.nlgeom)
-            N_beam_trial.append(float(meta.get("N", 0.0)))
-            for a, ia in enumerate(dofs):
-                R[ia] += f_g[a]
-                for b, ib in enumerate(dofs):
-                    K[ia, ib] += k_g[a, b]
+        # Use JIT kernel if available (DC_FAST=1)
+        use_jit = assemble_elements is not None
+
+        if use_jit and len(self.beams) > 0:
+            # Collect element data for JIT aggregation (beams)
+            beam_k_locals = []
+            beam_f_locals = []
+            beam_dof_maps = []
+
+            for e in self.beams:
+                dofs, k_g, f_g, meta = e.stiffness_and_force_global(u_trial, include_geo=self.nlgeom)
+                N_beam_trial.append(float(meta.get("N", 0.0)))
+                beam_k_locals.append(k_g)
+                beam_f_locals.append(f_g)
+                beam_dof_maps.append(dofs)
+
+            # Convert to numpy arrays and call JIT kernel
+            beam_k_arr = np.array(beam_k_locals, dtype=float)
+            beam_f_arr = np.array(beam_f_locals, dtype=float)
+            beam_dof_arr = np.array(beam_dof_maps, dtype=np.int32)
+            assemble_elements(K, R, beam_k_arr, beam_f_arr, beam_dof_arr)
+
+        else:
+            # Fallback: original Python loop
+            for e in self.beams:
+                dofs, k_g, f_g, meta = e.stiffness_and_force_global(u_trial, include_geo=self.nlgeom)
+                N_beam_trial.append(float(meta.get("N", 0.0)))
+                for a, ia in enumerate(dofs):
+                    R[ia] += f_g[a]
+                    for b, ib in enumerate(dofs):
+                        K[ia, ib] += k_g[a, b]
 
 
         # Update hinge axial coupling from associated frame element axial force (tension-positive convention).
@@ -102,14 +133,59 @@ class Model:
                         if fh is not None and hasattr(fh, "N_target"):
                             setattr(fh, "N_target", float(getattr(h, "beam_sign", -1.0)) * float(N_tension))
 
-        for h in self.hinges:
-            k_l, f_l, inf = h.eval_trial(u_trial, u_comm)
-            dofs = h.dofs()
-            for a, ia in enumerate(dofs):
-                R[ia] += f_l[a]
-                for b, ib in enumerate(dofs):
-                    K[ia, ib] += k_l[a, b]
-            info["hinges"].append(inf)
+        if use_jit and len(self.hinges) > 0:
+            # Collect hinge data for JIT aggregation
+            hinge_k_locals = []
+            hinge_f_locals = []
+            hinge_dof_maps = []
+
+            for h in self.hinges:
+                k_l, f_l, inf = h.eval_trial(u_trial, u_comm)
+                dofs = h.dofs()
+                hinge_k_locals.append(k_l)
+                hinge_f_locals.append(f_l)
+                hinge_dof_maps.append(np.array(dofs, dtype=np.int32))
+                info["hinges"].append(inf)
+
+            # Pad to uniform size if needed
+            max_dof = max(len(dofs) for dofs in hinge_dof_maps)
+            hinge_k_padded = []
+            hinge_f_padded = []
+            hinge_dof_padded = []
+
+            for k_l, f_l, dofs in zip(hinge_k_locals, hinge_f_locals, hinge_dof_maps):
+                n_dof = len(dofs)
+                if n_dof < max_dof:
+                    k_pad = np.zeros((max_dof, max_dof))
+                    k_pad[:n_dof, :n_dof] = k_l
+                    f_pad = np.zeros(max_dof)
+                    f_pad[:n_dof] = f_l
+                    dof_pad = np.zeros(max_dof, dtype=np.int32)
+                    dof_pad[:n_dof] = dofs
+                    hinge_k_padded.append(k_pad)
+                    hinge_f_padded.append(f_pad)
+                    hinge_dof_padded.append(dof_pad)
+                else:
+                    hinge_k_padded.append(k_l)
+                    hinge_f_padded.append(f_l)
+                    hinge_dof_padded.append(dofs)
+
+            # Convert to numpy arrays and call JIT kernel
+            hinge_k_arr = np.array(hinge_k_padded, dtype=float)
+            hinge_f_arr = np.array(hinge_f_padded, dtype=float)
+            hinge_dof_arr = np.array(hinge_dof_padded, dtype=np.int32)
+            assemble_elements(K, R, hinge_k_arr, hinge_f_arr, hinge_dof_arr)
+
+        else:
+            # Fallback: original Python loop
+            for h in self.hinges:
+                k_l, f_l, inf = h.eval_trial(u_trial, u_comm)
+                dofs = h.dofs()
+                for a, ia in enumerate(dofs):
+                    R[ia] += f_l[a]
+                    for b, ib in enumerate(dofs):
+                        K[ia, ib] += k_l[a, b]
+                info["hinges"].append(inf)
 
         fd = self.free_dofs()
         return K[np.ix_(fd, fd)], R[fd], info
