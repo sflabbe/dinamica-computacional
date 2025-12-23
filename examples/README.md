@@ -6,7 +6,7 @@ For the verification / research-style scripts, run the `problems` modules instea
 
 ```bash
 python -m problems.problema2_interaccion
-python -m problems.problema3_shm_verification
+python -m problems.problema3_shm_verify
 python -m problems.problema4_portico --beam-hinge compare --integrator hht
 python -m problems.problema5_fiber_section_interaction --mode all
 ```
