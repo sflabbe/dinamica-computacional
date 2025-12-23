@@ -11,6 +11,13 @@ from dc_solver.fem.nodes import Node
 from dc_solver.fem.frame2d import FrameElementLinear2D
 from dc_solver.hinges.models import RotSpringElement, HingeNM2DElement, FiberRotSpringElement
 
+# Import JIT assembly kernels (Option 2 optimization)
+from dc_solver.kernels.assemble_jit import (
+    aggregate_element_stiffness,
+    aggregate_hinge_stiffness,
+    is_jit_enabled,
+)
+
 
 @dataclass
 class Model:
@@ -63,10 +70,9 @@ class Model:
         for e in self.beams:
             dofs, k_g, f_g, meta = e.stiffness_and_force_global(u_trial, include_geo=self.nlgeom)
             N_beam_trial.append(float(meta.get("N", 0.0)))
-            for a, ia in enumerate(dofs):
-                R[ia] += f_g[a]
-                for b, ib in enumerate(dofs):
-                    K[ia, ib] += k_g[a, b]
+
+            # Use JIT kernel for aggregation if available (Option 2 optimization)
+            aggregate_element_stiffness(K, R, k_g, f_g, dofs)
 
 
         # Update hinge axial coupling from associated frame element axial force (tension-positive convention).
@@ -105,10 +111,10 @@ class Model:
         for h in self.hinges:
             k_l, f_l, inf = h.eval_trial(u_trial, u_comm)
             dofs = h.dofs()
-            for a, ia in enumerate(dofs):
-                R[ia] += f_l[a]
-                for b, ib in enumerate(dofs):
-                    K[ia, ib] += k_l[a, b]
+
+            # Use JIT kernel for aggregation if available (Option 2 optimization)
+            aggregate_hinge_stiffness(K, R, k_l, f_l, dofs)
+
             info["hinges"].append(inf)
 
         fd = self.free_dofs()

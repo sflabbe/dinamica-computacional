@@ -251,11 +251,10 @@ class FrameElementLinear2D:
                 k_g += T.T @ k_geo_l @ T
                 f_g += T.T @ (k_geo_l @ u_l)
 
-        # Return copies to ensure caller can mutate without affecting buffers
-        if _DC_FAST and self._buf_T is not None:
-            return dofs, k_g.copy(), f_g.copy(), {"N": float(N_tension)}
-        else:
-            return dofs, k_g, f_g, {"N": float(N_tension)}
+        # Note: When using buffers, k_g and f_g point to self._buf_* arrays.
+        # The caller (Model.assemble) immediately extracts values by indexing,
+        # so we don't need to copy here. The buffers are reused on the next call.
+        return dofs, k_g, f_g, {"N": float(N_tension)}
 
     def equiv_nodal_load_global(self, w_global: Tuple[float, float]) -> np.ndarray:
         """Consistent nodal load for uniform distributed load in global axes."""
