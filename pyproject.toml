@@ -1,13 +1,24 @@
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "plastic-hinge-nm"
 version = "0.1.0"
+description = "Compact 2D frame solver for structural dynamics experiments"
+readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["numpy", "matplotlib"]
+dependencies = [
+  "numpy",
+  "matplotlib",
+]
 
 [project.optional-dependencies]
-dev = ["pytest"]
-test = ["pytest"]
-numba = ["numba>=0.61; python_version>=\"3.10\""]
+numba = ["numba>=0.61; python_version >= '3.10' and python_version < '3.14'"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 dc-solver-tests = "pytest:main"
@@ -15,3 +26,16 @@ dc-solver-tests = "pytest:main"
 [tool.setuptools.packages.find]
 where = ["src", "."]
 include = ["dc_solver*", "problems*", "plastic_hinge*"]
+exclude = ["tests*", "examples*", "legacy*", "tools*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+markers = [
+    "integration: tests that exercise integration boundaries between local components",
+    "optional_external: tests that require auxiliary repositories or editable installs",
+    "slow: long-running integration or dynamic tests; run with pytest -q -m slow",
+]

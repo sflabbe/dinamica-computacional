@@ -46,48 +46,43 @@ and balconies extend to positive x.
 
 ---
 
-## Install
+## Development setup
 
-Recommended (editable install):
+`uv` ist die Quelle für lokale Umgebung und Lockfile. `requirements.txt` wird
+nicht verwendet.
 
-```bash
-python -m pip install -U pip
-python -m pip install -e .
-```
-
-Alternative (without installing): run scripts directly from `src/problems/` using `PYTHONPATH=src`.
-
----
-
-## Tests
-
-Use the quick suite for CI and coding agents. It excludes long-running dynamic
-integration checks that are still available under the `slow` marker:
+### Voraussetzungen
 
 ```bash
-pytest -q -m "not slow"
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Run only the slow tests when changing dynamic integration, input-deck end-to-end
-runs, or the Problema 4 IDA workflow:
+### Standard-Setup
 
 ```bash
-pytest -q -m slow
+uv sync --all-extras --dev
+uv run pytest -q -m "not slow"
 ```
 
-Run the full suite before release-style validation:
+Alternativ über `make`:
 
 ```bash
-pytest -q
+make sync
+make test-fast
 ```
 
-To review timing regressions:
+### Lockfile und Dependencies
 
 ```bash
-pytest --durations=20
+uv lock
+uv lock --check
+uv add numpy
+uv add --dev pytest
+uv add --optional numba "numba>=0.61"
 ```
 
----
+Das optionale `numba` Extra bleibt optional. Der CI-Fast-Pfad setzt
+`DC_USE_NUMBA=0` und führt die Tests ohne JIT-Pflicht aus.
 
 ## Run the problems
 
