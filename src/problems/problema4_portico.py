@@ -758,6 +758,7 @@ def run_incremental_amplitudes(
     t_end=10.0,
     base_dt=0.002,
     dt_min=0.00025,
+    max_cutbacks: int = 20,
     alpha=-0.05,
     nseg: int = 6,
     cover: float = 0.05,
@@ -791,6 +792,13 @@ def run_incremental_amplitudes(
     """
 
     import copy
+
+    if float(base_dt) <= 0.0:
+        raise ValueError("base_dt must be positive")
+    if float(dt_min) <= 0.0:
+        raise ValueError("dt_min must be positive")
+    if int(max_cutbacks) < 0:
+        raise ValueError("max_cutbacks must be non-negative")
 
     g = 9.81
 
@@ -837,6 +845,11 @@ def run_incremental_amplitudes(
                 "ux_roof": float(grav.get("ux_roof", float("nan"))),
                 "uy_roof": float(grav.get("uy_roof", float("nan"))),
                 "drift": float(grav.get("drift", float("nan"))),
+            },
+            "dynamic": {
+                "base_dt": float(base_dt),
+                "dt_min": float(dt_min),
+                "max_cutbacks": int(max_cutbacks),
             },
         }
     )
@@ -896,6 +909,7 @@ def run_incremental_amplitudes(
     for idx, A_g in enumerate(amps_g):
         A = float(A_g) * g
         dt = float(base_dt)
+        cutbacks = 0
 
         while True:
             # Fresh copy per attempt (avoids polluting the committed hinge history on failed dt tries)
@@ -975,11 +989,13 @@ def run_incremental_amplitudes(
             except RuntimeError as e:
                 if debug_cutback:
                     print(f"    cutback: A_g={A_g:.2f} dt={dt:g} failed: {e}")
-                if dt <= float(dt_min) + 1e-15:
-                    print(f"  [{idx+1}/{len(amps_g)}] A_g={A_g:.2f} - COLLAPSE (dt<dtmin)")
+                if dt <= float(dt_min) + 1e-15 or cutbacks >= int(max_cutbacks):
+                    reason = "dt<dtmin" if dt <= float(dt_min) + 1e-15 else f"max_cutbacks={int(max_cutbacks)}"
+                    print(f"  [{idx+1}/{len(amps_g)}] A_g={A_g:.2f} - COLLAPSE ({reason})")
                     meta.update({"dt_hist": dt_hist, "amps_g_used": amps_g[:len(peak_drifts)]})
                     return peak_drifts, amps_g[:len(peak_drifts)], last, model_last, meta
                 dt *= 0.5
+                cutbacks += 1
                 continue
 
         pk = float(np.max(np.abs(last["drift"]))) if last is not None else float("nan")
@@ -1158,6 +1174,7 @@ def main():
     parser.add_argument("--t-end", type=float, default=10.0, help="End time for dynamic step [s].")
     parser.add_argument("--base-dt", type=float, default=0.002, help="Initial time step for dynamic step [s].")
     parser.add_argument("--dt-min", type=float, default=0.00025, help="Minimum allowed cutback dt [s].")
+    parser.add_argument("--max-cutbacks", type=int, default=20, help="Maximum dt cutbacks per IDA amplitude.")
     parser.add_argument("--max-iter", type=int, default=50, help="Max Newton iterations per time step (implicit integrators).")
     parser.add_argument("--tol", type=float, default=1e-6, help="Newton tolerance for dynamic step.")
     parser.add_argument("--alpha", type=float, default=-0.05, help="HHT-alpha parameter (only for HHT).")
@@ -1467,6 +1484,7 @@ def main():
             t_end=float(args.t_end),
             base_dt=float(args.base_dt),
             dt_min=float(args.dt_min),
+            max_cutbacks=int(args.max_cutbacks),
             alpha=alpha,
             nseg=nseg,
             nlgeom=nlgeom,
@@ -1506,6 +1524,7 @@ def main():
         t_end=float(args.t_end),
         base_dt=float(args.base_dt),
         dt_min=float(args.dt_min),
+        max_cutbacks=int(args.max_cutbacks),
         alpha=alpha,
         nseg=nseg,
         nlgeom=nlgeom,
@@ -1538,6 +1557,7 @@ def main():
         t_end=float(args.t_end),
         base_dt=float(args.base_dt),
         dt_min=float(args.dt_min),
+        max_cutbacks=int(args.max_cutbacks),
         alpha=alpha,
         nseg=nseg,
         nlgeom=nlgeom,

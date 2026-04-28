@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from numpy.testing import assert_allclose
 
 from dc_solver.io.abaqus_inp import parse_inp, build_model, apply_gravity, amplitude_series
@@ -29,6 +30,7 @@ def test_job1_trimmed_parses_and_static_converges():
     assert np.isfinite(u).all()
 
 
+@pytest.mark.slow
 def test_portal_6seg_runs_static_and_dynamic():
     data = parse_inp("examples/abaqus_like/portal_6seg.inp")
     step_static = data.steps[0]

@@ -59,6 +59,36 @@ Alternative (without installing): run scripts directly from `src/problems/` usin
 
 ---
 
+## Tests
+
+Use the quick suite for CI and coding agents. It excludes long-running dynamic
+integration checks that are still available under the `slow` marker:
+
+```bash
+pytest -q -m "not slow"
+```
+
+Run only the slow tests when changing dynamic integration, input-deck end-to-end
+runs, or the Problema 4 IDA workflow:
+
+```bash
+pytest -q -m slow
+```
+
+Run the full suite before release-style validation:
+
+```bash
+pytest -q
+```
+
+To review timing regressions:
+
+```bash
+pytest --durations=20
+```
+
+---
+
 ## Run the problems
 
 ### Problem 2 — N–M hinge verification
