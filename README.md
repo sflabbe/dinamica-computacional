@@ -18,6 +18,32 @@ Outputs are written under `./outputs/` by default.
 
 > For convergence issues (Newton / dt cutbacks / fiber hinge), see **`DEBUG_CHECKLIST.md`**.
 
+## Typical balcony frame plot
+
+Downstream automation can create a deterministic PNG of a typical balcony
+frame without building a finite-element model:
+
+```python
+from dc_solver.post import TypicalBalconyFrameSpec, plot_typical_balcony_frame
+
+spec = TypicalBalconyFrameSpec(
+    floors=4,
+    bay_width_m=4.5,
+    story_height_m=3.0,
+    balcony_depth_m=1.6,
+    facade_x_m=0.0,
+    show_node_labels=True,
+)
+
+plot_typical_balcony_frame(spec, "outputs/typical_balcony_frame.png")
+```
+
+The plotting helper uses Matplotlib's `Agg` backend and writes PNG files
+without requiring a display server.  Segment geometry is also available through
+`typical_balcony_frame_segments(spec)` for adapters that need coordinates.
+`facade_x_m` defines the facade grid line; the interior bay extends to the left
+and balconies extend to positive x.
+
 ---
 
 ## Install
@@ -224,4 +250,3 @@ DC_USE_NUMBA=0 PYTHONPATH=src python -m problems.problema4_portico --integrator 
 - `plastic_hinge/` : N–M hinge return mapping + fiber section tools
 - `src/dc_solver/` : FEM core, integrators, post-processing, job/reporting
 - `src/problems/`  : reproducible problem scripts
-
