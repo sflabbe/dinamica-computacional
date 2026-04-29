@@ -9,6 +9,10 @@ Default CI runs deterministic fast tests only.
 - It runs `python -m pytest -q -m "not slow"`.
 - It sets `DC_USE_NUMBA=0` so optional local/global Numba installs cannot
   change the CI path or fail collection through cache setup.
+  **`DC_USE_NUMBA=0` disables ALL JIT kernels**: `plastic_hinge/_numba.py`,
+  `dc_solver/kernels/hinge_jit.py`, and `dc_solver/kernels/assemble_jit.py`.
+  `DC_FAST=1` is a backwards-compatible alias for enabling JIT but is overridden
+  by `DC_USE_NUMBA=0`.
 - Tests that need auxiliary repos must be marked `optional_external` and kept
   out of default CI until a real optional job is added for them.
 
