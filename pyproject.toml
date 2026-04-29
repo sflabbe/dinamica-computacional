@@ -21,6 +21,7 @@ Repository = "https://github.com/sflabbe/dinamica-computacional"
 
 [project.optional-dependencies]
 numba = ["numba>=0.61; python_version >= '3.10' and python_version < '3.14'"]
+app = ["streamlit>=1.35", "pandas>=2.0"]
 # Reserved for Phase 2 — do not install yet:
 # modal = ["scipy>=1.10"]
 
@@ -32,7 +33,7 @@ dc-solver-tests = "pytest:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["dc_solver*", "problems*", "plastic_hinge*"]
+include = ["dc_solver*", "problems*", "plastic_hinge*", "app*"]
 exclude = ["tests*", "examples*", "legacy*", "tools*"]
 
 [tool.pytest.ini_options]
