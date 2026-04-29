@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def test_import_app_module() -> None:
-    import app.app as app_module
+    import app.main as app_module
 
     assert app_module is not None
 
