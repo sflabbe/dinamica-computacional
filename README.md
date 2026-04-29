@@ -87,7 +87,7 @@ python -m pip install pytest
 Windows PowerShell:
 
 ```powershell
-py -m venv .venv
+python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[numba,app]"
@@ -97,7 +97,7 @@ python -m pip install pytest
 Windows `cmd.exe`:
 
 ```cmd
-py -m venv .venv
+python -m venv .venv
 .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 python -m pip install -e ".[numba,app]"
