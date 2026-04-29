@@ -87,6 +87,65 @@ class ColumnHingeNMRot:
 
 
 @dataclass
+class BilinearMThetaHinge1D:
+    """Bilinear moment-rotation hinge with explicit 1D return mapping.
+
+    Use this deterministic law for benchmarks that expect classical
+    elastic-plastic M-theta behavior. It is intentionally separate from
+    SHMBeamHinge1D, which is a smooth Bouc-Wen hysteresis model with optional
+    degradation and is not an exact return-mapping oracle.
+    """
+
+    K0: float
+    My: float
+    alpha_post: float = 0.0
+
+    th_p_comm: float = 0.0
+    a_comm: float = 0.0
+    M_comm: float = 0.0
+
+    def _hardening_modulus(self) -> float:
+        alpha = float(self.alpha_post)
+        K0 = float(self.K0)
+        if alpha <= 0.0:
+            return 0.0
+        if alpha >= 1.0:
+            return float("inf")
+        return float(alpha * K0 / max(1.0 - alpha, 1e-18))
+
+    def eval_increment(self, dth: float) -> Tuple[float, float, float, float, float]:
+        K0 = float(self.K0)
+        My = abs(float(self.My))
+        if K0 <= 0.0:
+            raise ValueError("BilinearMThetaHinge1D requires K0 > 0")
+        if My <= 0.0:
+            raise ValueError("BilinearMThetaHinge1D requires My > 0")
+
+        H = self._hardening_modulus()
+        M_trial = float(self.M_comm) + K0 * float(dth)
+
+        if math.isinf(H):
+            return M_trial, K0, float(self.th_p_comm), float(self.a_comm), M_trial
+
+        f_trial = abs(M_trial) - (My + H * float(self.a_comm))
+        if f_trial <= 1e-12:
+            return M_trial, K0, float(self.th_p_comm), float(self.a_comm), M_trial
+
+        sgn = 1.0 if M_trial >= 0.0 else -1.0
+        dg = f_trial / max(K0 + H, 1e-18)
+        M_new = M_trial - K0 * dg * sgn
+        th_p_new = float(self.th_p_comm) + dg * sgn
+        a_new = float(self.a_comm) + dg
+
+        if H == 0.0:
+            k_tan = max(float(self.alpha_post) * K0, 1e-12)
+        else:
+            k_tan = K0 * H / max(K0 + H, 1e-18)
+
+        return float(M_new), float(k_tan), float(th_p_new), float(a_new), float(M_new)
+
+
+@dataclass
 class SHMBeamHinge1D:
     """Smooth Hysteretic Model (SHM) beam-end rotational hinge (educational).
 
@@ -616,8 +675,9 @@ class RotSpringElement:
     Supported kinds
     ---------------
     * "col_nm"    : ColumnHingeNMRot (My depends on N via Model.update_column_yields)
-    * "beam_shm"  : SHMBeamHinge1D (optionally with My(N) via N_comp_current)
-    * "beam_fiber": FiberBeamHinge1D (compat mode; prefer FiberRotSpringElement)
+    * "beam_bilinear": BilinearMThetaHinge1D exact M-theta return mapping
+    * "beam_shm"     : SHMBeamHinge1D (optionally with My(N) via N_comp_current)
+    * "beam_fiber"   : FiberBeamHinge1D (compat mode; prefer FiberRotSpringElement)
     """
 
     ni: int
@@ -625,7 +685,7 @@ class RotSpringElement:
     kind: str
 
     col_hinge: Optional[ColumnHingeNMRot] = None
-    beam_hinge: Optional[object] = None  # SHMBeamHinge1D or (compat) FiberBeamHinge1D
+    beam_hinge: Optional[object] = None  # BilinearMThetaHinge1D, SHMBeamHinge1D or (compat) FiberBeamHinge1D
     nodes: List[Node] = None  # injected by builder
 
     # Optional: provide a dedicated fiber hinge object (compat mode)
@@ -686,6 +746,30 @@ class RotSpringElement:
                 "a": float(a_new),
                 "th_p": float(th_p_new),
                 "dW_pl": float(dW_pl),
+            }
+
+        elif kind in ("beam_bilinear", "mtheta_bilinear"):
+            if self.beam_hinge is None:
+                raise ValueError("beam_bilinear hinge requested but beam_hinge is None")
+            M_new, kM, th_p_new, a_new, _ = self.beam_hinge.eval_increment(dth_inc)
+            dW_pl = abs(float(M_new) * float(dth_inc))
+            self._trial = {
+                "kind": "beam_bilinear",
+                "th_p_new": float(th_p_new),
+                "a_new": float(a_new),
+                "M_new": float(M_new),
+            }
+
+            info = {
+                "kind": "beam_bilinear",
+                "name": str(self.name) if self.name else "",
+                "dtheta": float(dth_inc),
+                "M": float(M_new),
+                "k": float(kM),
+                "a": float(a_new),
+                "th_p": float(th_p_new),
+                "dW_pl": float(dW_pl),
+                "My": float(abs(getattr(self.beam_hinge, "My", 0.0))),
             }
 
         elif kind == "beam_shm":
@@ -770,6 +854,11 @@ class RotSpringElement:
             self.col_hinge.a_comm = float(self._trial.get("a_new", self.col_hinge.a_comm))
             self.col_hinge.M_comm = float(self._trial.get("M_new", self.col_hinge.M_comm))
 
+        elif kind == "beam_bilinear" and self.beam_hinge is not None:
+            self.beam_hinge.th_p_comm = float(self._trial.get("th_p_new", getattr(self.beam_hinge, "th_p_comm", 0.0)))
+            self.beam_hinge.a_comm = float(self._trial.get("a_new", getattr(self.beam_hinge, "a_comm", 0.0)))
+            self.beam_hinge.M_comm = float(self._trial.get("M_new", getattr(self.beam_hinge, "M_comm", 0.0)))
+
         elif kind == "beam_shm" and self.beam_hinge is not None:
             self.beam_hinge.th_comm = float(self._trial.get("th_new", getattr(self.beam_hinge, "th_comm", 0.0)))
             self.beam_hinge.z_comm = float(self._trial.get("z_new", getattr(self.beam_hinge, "z_comm", 0.0)))
@@ -791,6 +880,11 @@ class RotSpringElement:
             self.col_hinge.th_p_comm = 0.0
             self.col_hinge.a_comm = 0.0
             self.col_hinge.M_comm = 0.0
+
+        elif kind in ("beam_bilinear", "mtheta_bilinear") and self.beam_hinge is not None:
+            self.beam_hinge.th_p_comm = 0.0
+            self.beam_hinge.a_comm = 0.0
+            self.beam_hinge.M_comm = 0.0
 
         elif kind == "beam_shm" and self.beam_hinge is not None:
             self.beam_hinge.th_comm = 0.0

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple, Dict
 
 import numpy as np
@@ -29,7 +29,7 @@ class Model:
     mass_diag: np.ndarray
     C_diag: np.ndarray
     load_const: np.ndarray
-    col_hinge_groups: List[Tuple[int, int, int]]
+    col_hinge_groups: List[Tuple[int, int, int]] = field(default_factory=list)
     nlgeom: bool = False
 
     def ndof(self) -> int:
