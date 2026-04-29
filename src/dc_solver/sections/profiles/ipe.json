@@ -1,0 +1,5 @@
+[
+  {"name":"IPE 100","source":"public manufacturer profile table; verify before production use","units_original":"mm, cm2, cm4, cm3","review_required":true,"h_mm":100.0,"b_mm":55.0,"tw_mm":4.1,"tf_mm":5.7,"A_cm2":10.3,"Iy_cm4":171.0,"Iz_cm4":15.9,"Wel_y_cm3":34.2,"Wpl_y_cm3":39.4,"Wel_z_cm3":5.79,"Wpl_z_cm3":9.14,"iy_cm":4.07,"iz_cm":1.24},
+  {"name":"IPE 200","source":"public manufacturer profile table; verify before production use","units_original":"mm, cm2, cm4, cm3","review_required":true,"h_mm":200.0,"b_mm":100.0,"tw_mm":5.6,"tf_mm":8.5,"A_cm2":28.5,"Iy_cm4":1940.0,"Iz_cm4":142.0,"Wel_y_cm3":194.0,"Wpl_y_cm3":221.0,"Wel_z_cm3":28.5,"Wpl_z_cm3":44.6,"iy_cm":8.26,"iz_cm":2.24},
+  {"name":"IPE 300","source":"public manufacturer profile table; verify before production use","units_original":"mm, cm2, cm4, cm3","review_required":true,"h_mm":300.0,"b_mm":150.0,"tw_mm":7.1,"tf_mm":10.7,"A_cm2":53.8,"Iy_cm4":8360.0,"Iz_cm4":604.0,"Wel_y_cm3":557.0,"Wpl_y_cm3":628.0,"Wel_z_cm3":80.5,"Wpl_z_cm3":126.0,"iy_cm":12.5,"iz_cm":3.35}
+]
