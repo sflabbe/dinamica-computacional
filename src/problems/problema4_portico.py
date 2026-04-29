@@ -425,8 +425,8 @@ def build_portal_beam_hinge(
             section=beam_sec_R,
             Lp=Lp_beam,
             N_target=0.0,  # overwritten during assembly from beam axial force
-            kappa_factor=2.0,
-            moment_sign=-1.0,
+            kappa_factor=-2.0,
+            moment_sign=+1.0,
             tol_N=100.0,   
             max_iter_eps0=80,
             line_search=bool(fiber_line_search),
