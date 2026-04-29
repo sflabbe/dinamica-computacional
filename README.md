@@ -2,6 +2,41 @@
 
 This repository contains a compact 2D **frame** (beam/column) solver aimed at reproducible structural dynamics experiments.
 
+## What this repo is
+2D frame solver for structural dynamics experiments.
+
+## What this repo is not
+Not a prüffähiger structural design package. Not a replacement for EC3/EC8/EC9 checks.
+
+## Installation
+```bash
+uv sync --all-extras --dev
+```
+
+## Run tests
+```bash
+DC_USE_NUMBA=0 PYTHONPATH=src:. pytest -q
+```
+
+## Run CLI example
+```bash
+PYTHONPATH=src:. python -m problems.problema4_portico --beam-hinge shm --gravity --line-search
+```
+
+## Run app
+```bash
+uv run --extra app streamlit run app/app.py
+```
+
+## Architecture
+core: src/dc_solver  
+legacy/research: plastic_hinge  
+examples/problems: src/problems  
+ui: app
+
+## Evidence level
+Implemented and tested / partial / placeholder.
+
 ## Features
 
 - **Coupled N–M plastic hinge** (polygonal yield surface + return mapping)

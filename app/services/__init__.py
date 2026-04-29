@@ -14,6 +14,11 @@ from .dynamic_service import (
     make_sine_ground_motion,
     run_dynamic_case,
 )
+from .export_service import (
+    export_analysis_bundle,
+    export_analysis_bundle_json,
+    to_jsonable,
+)
 
 __all__ = [
     "AnalysisSettings",
@@ -31,4 +36,7 @@ __all__ = [
     "make_sine_ground_motion",
     "run_dynamic_case",
     "dynamic_summary",
+    "to_jsonable",
+    "export_analysis_bundle",
+    "export_analysis_bundle_json",
 ]
