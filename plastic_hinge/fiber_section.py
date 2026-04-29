@@ -298,8 +298,75 @@ class FiberSection2D:
 
 
 @njit(cache=True)
+def _sigma_c_ceb90_tangent_scalar(eps: float, fc: float, eps_c0: float, E_ci: float) -> Tuple[float, float]:
+    """CEB-90 uniaxial concrete: ascending branch + post-peak softening.
+
+    Compression-positive convention. Tension neglected.
+
+    Parameters
+    ----------
+    eps   : total compressive strain (compression > 0)
+    fc    : peak compressive stress [Pa]
+    eps_c0: strain at peak stress [-]
+    E_ci  : initial tangent modulus [Pa]  (E_ci = 21500e6*(fc_MPa/10)^(1/3))
+
+    Returns
+    -------
+    sig : stress [Pa]
+    Et  : tangent modulus [Pa]  (< 0 on softening branch)
+
+    Reference
+    ---------
+    CEB-FIP Model Code 1990, implemented following compression.py in the
+    cdp-generator project (CEB-90 Sargin formula with smooth post-peak).
+    """
+    if eps <= 0.0:
+        return 0.0, 0.0
+
+    E_c1 = fc / eps_c0                      # secant modulus at peak
+    eta_E = E_ci / E_c1                      # tangent/secant ratio (≈ 2.0–2.5 for NSC)
+    r = eps / eps_c0
+
+    # --- inflection point (boundary ascending / descending) ---
+    tmp = 0.5 * eta_E + 1.0
+    disc = 0.25 * tmp * tmp - 0.5
+    if disc < 0.0:
+        disc = 0.0
+    eta_lim = 0.5 * tmp + disc ** 0.5       # = e_clim / eps_c0
+
+    if r <= eta_lim:
+        # ---- ascending branch (Sargin formula) ----
+        denom = 1.0 + (eta_E - 2.0) * r
+        if denom <= 1e-30:
+            return fc, 0.0
+        sig = fc * (eta_E * r - r * r) / denom
+        # analytical tangent: dσ/dε = fc*(η-2r-(η-2)r²) / (denom²·eps_c0)
+        num_Et = eta_E - 2.0 * r - (eta_E - 2.0) * r * r
+        Et = fc * num_Et / (denom * denom * eps_c0)
+        sig = max(0.0, min(sig, fc))
+        return sig, Et
+    else:
+        # ---- descending / softening branch ----
+        xi_num = 4.0 * (eta_lim * eta_lim * (eta_E - 2.0) + 2.0 * eta_lim - eta_E)
+        xi_den = (eta_lim * (eta_E - 2.0) + 1.0) ** 2
+        xi = xi_num / xi_den if xi_den > 1e-30 else 0.0
+
+        a_coef = xi / eta_lim - 2.0 / (eta_lim * eta_lim)
+        b_coef = 4.0 / eta_lim - xi
+        denom_d = a_coef * r * r + b_coef * r
+        if denom_d <= 1e-30:
+            return 0.0, 0.0
+        sig = fc / denom_d
+        sig = max(0.0, min(sig, fc))
+        # tangent (negative → softening)
+        Et = -fc * (2.0 * a_coef * r + b_coef) / (denom_d * denom_d * eps_c0)
+        return sig, Et
+
+
+# Keep old name as alias for backward compatibility with non-stateful kernel
+@njit(cache=True)
 def _sigma_c_tangent_scalar(eps: float, fc: float, eps_c0: float, eps_cu: float) -> Tuple[float, float]:
-    """Concrete stress + tangent (compression positive, tension neglected)."""
+    """Legacy parabolic-rect model. Used only by non-stateful FiberSection."""
     if eps <= 0.0:
         return 0.0, 0.0
     if eps <= eps_c0:
@@ -341,11 +408,16 @@ def _fiber_response_tangent_stateful_kernel(
     Es: float,
     do_update: bool,
     eps_p_new: np.ndarray,
+    E_ci: float = 0.0,
 ) -> Tuple[float, float, float, float, float, float]:
     """Return N,M and tangents dN/de0, dN/dk, dM/de0, dM/dk.
 
     If do_update=True, eps_p_new is written (steel fibers updated). Otherwise, eps_p_new
     is ignored (may be used as scratch).
+
+    E_ci: initial tangent modulus for CEB-90 concrete model [Pa].
+    If E_ci > 0, uses CEB-90 (with post-peak softening).
+    If E_ci <= 0, falls back to legacy parabolic-rect model.
     """
     N = 0.0
     M = 0.0
@@ -358,7 +430,10 @@ def _fiber_response_tangent_stateful_kernel(
     for i in range(n):
         eps = eps0 + kappa * (y_c - y[i])
         if mat_id[i] == 0:
-            sig, Et = _sigma_c_tangent_scalar(eps, fc, eps_c0, eps_cu)
+            if E_ci > 0.0:
+                sig, Et = _sigma_c_ceb90_tangent_scalar(eps, fc, eps_c0, E_ci)
+            else:
+                sig, Et = _sigma_c_tangent_scalar(eps, fc, eps_c0, eps_cu)
             if do_update:
                 eps_p_new[i] = eps_p_old[i]
         else:
@@ -429,6 +504,11 @@ class FiberSection2DStateful:
         if steel is None:
             steel = SteelBilinearPerfect(fy=0.0)
 
+        # CEB-90 initial tangent modulus: E_ci = 21 500 MPa * (f_cm/10 MPa)^(1/3)
+        # fc is in Pa here; convert to MPa, apply formula, convert back.
+        fc_MPa = float(conc.fc) / 1.0e6
+        E_ci_Pa = 21500.0e6 * (fc_MPa / 10.0) ** (1.0 / 3.0) if fc_MPa > 0.0 else 0.0
+
         return {
             "A": A,
             "y": y,
@@ -438,6 +518,7 @@ class FiberSection2DStateful:
             "eps_cu": float(conc.eps_cu),
             "fy": float(steel.fy),
             "Es": float(steel.Es),
+            "E_ci": float(E_ci_Pa),
         }
 
     def reset_state(self) -> None:
@@ -476,6 +557,7 @@ class FiberSection2DStateful:
             float(p["Es"]),
             False,
             self._eps_p_trial,
+            float(p.get("E_ci", 0.0)),
         )
         return float(N), float(M), float(dN_de0), float(dN_dk), float(dM_de0), float(dM_dk)
 
@@ -503,6 +585,7 @@ class FiberSection2DStateful:
             float(p["Es"]),
             True,
             self._eps_p_trial,
+            float(p.get("E_ci", 0.0)),
         )
 
         return float(N), float(M), float(dN_de0), float(dN_dk), float(dM_de0), float(dM_dk)
