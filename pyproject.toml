@@ -8,7 +8,7 @@ name = "dc-solver"
 version = "0.2.0"
 description = "2D frame solver for structural dynamics: nonlinear static, modal, and time-history analysis"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
   "numpy",
   "matplotlib",
