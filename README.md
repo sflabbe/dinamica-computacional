@@ -6,27 +6,127 @@ This repository contains a compact 2D **frame** (beam/column) solver aimed at re
 2D frame solver for structural dynamics experiments.
 
 ## What this repo is not
-Not a prüffähiger structural design package. Not a replacement for EC3/EC8/EC9 checks.
+Not a certifiable structural design package. Not a replacement for EC3/EC8/EC9 checks.
 
-## Installation
+## Installation and usage (Python 3.10+)
+
+The authoritative Python requirement is defined in `pyproject.toml`: **Python 3.10+**.
+
+### Recommended workflow: `uv` (Linux/macOS)
+
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --all-extras --dev
 ```
 
-## Run tests
+Run fast tests (CI-like path, JIT disabled):
+
 ```bash
-DC_USE_NUMBA=0 PYTHONPATH=src:. pytest -q
+DC_USE_NUMBA=0 PYTHONPATH=src:. uv run pytest -q -m "not slow"
 ```
 
-## Run CLI example
+Run a CLI example:
+
 ```bash
-PYTHONPATH=src:. python -m problems.problema4_portico --beam-hinge shm --gravity --line-search
+PYTHONPATH=src:. uv run python -m problems.problema4_portico --beam-hinge shm --gravity --line-search
 ```
 
-## Run app
+Run the Streamlit app:
+
 ```bash
 uv run --extra app streamlit run app/app.py
 ```
+
+### Recommended workflow: `uv` (Windows PowerShell)
+
+```powershell
+winget install --id=astral-sh.uv -e
+uv sync --all-extras --dev
+```
+
+Run fast tests (CI-like path, JIT disabled):
+
+```powershell
+$env:DC_USE_NUMBA="0"; $env:PYTHONPATH="src;."; uv run pytest -q -m "not slow"
+```
+
+Run a CLI example:
+
+```powershell
+$env:PYTHONPATH="src;."; uv run python -m problems.problema4_portico --beam-hinge shm --gravity --line-search
+```
+
+Run the Streamlit app:
+
+```powershell
+uv run --extra app streamlit run app/app.py
+```
+
+### `cmd.exe` equivalents (where useful)
+
+```cmd
+set DC_USE_NUMBA=0
+set PYTHONPATH=src;.
+uv run pytest -q -m "not slow"
+```
+
+### Conservative fallback: `pip` from `pyproject.toml`
+
+Use this only if `uv` is not available in your environment. This fallback installs from project metadata (not from `requirements.txt`).
+
+Linux/macOS:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[numba,app]"
+python -m pip install pytest
+```
+
+Windows PowerShell:
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[numba,app]"
+python -m pip install pytest
+```
+
+Windows `cmd.exe`:
+
+```cmd
+py -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+python -m pip install -e ".[numba,app]"
+python -m pip install pytest
+```
+
+Test commands with `pip` environments:
+
+- Linux/macOS:
+  ```bash
+  DC_USE_NUMBA=0 PYTHONPATH=src:. pytest -q -m "not slow"
+  ```
+- Windows PowerShell:
+  ```powershell
+  $env:DC_USE_NUMBA="0"; $env:PYTHONPATH="src;."; pytest -q -m "not slow"
+  ```
+- Windows `cmd.exe`:
+  ```cmd
+  set DC_USE_NUMBA=0
+  set PYTHONPATH=src;.
+  pytest -q -m "not slow"
+  ```
+
+### Optional dependencies
+
+- `numba` extra: enables optional JIT acceleration when available.
+- `app` extra: installs Streamlit/pandas dependencies for `app/app.py`.
+
+JIT is optional by design. For deterministic fast test paths (local or CI), set `DC_USE_NUMBA=0`.
 
 ## Architecture
 core: src/dc_solver  
@@ -83,30 +183,24 @@ and balconies extend to positive x.
 
 ## Development setup
 
-`uv` ist die Quelle für lokale Umgebung und Lockfile. `requirements.txt` wird
-nicht verwendet.
+`uv` is the source of truth for local environments and lockfile management.
+`requirements.txt` is not used.
 
-### Voraussetzungen
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### Standard-Setup
+### Standard setup
 
 ```bash
 uv sync --all-extras --dev
-uv run pytest -q -m "not slow"
+DC_USE_NUMBA=0 PYTHONPATH=src:. uv run pytest -q -m "not slow"
 ```
 
-Alternativ über `make`:
+Alternative via `make`:
 
 ```bash
 make sync
 make test-fast
 ```
 
-### Lockfile und Dependencies
+### Lockfile and dependencies
 
 ```bash
 uv lock
@@ -116,8 +210,8 @@ uv add --dev pytest
 uv add --optional numba "numba>=0.61"
 ```
 
-Das optionale `numba` Extra bleibt optional. Der CI-Fast-Pfad setzt
-`DC_USE_NUMBA=0` und führt die Tests ohne JIT-Pflicht aus.
+The optional `numba` extra remains optional. The CI fast path sets
+`DC_USE_NUMBA=0` and runs tests without requiring JIT.
 
 ## Run the problems
 
