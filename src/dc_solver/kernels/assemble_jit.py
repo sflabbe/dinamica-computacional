@@ -19,17 +19,21 @@ from typing import List, Tuple
 
 import numpy as np
 
-# Detect DC_FAST environment variable
+# DC_USE_NUMBA=0 explicitly disables all JIT; DC_FAST=1 or DC_USE_NUMBA=1 activates it.
+_DC_USE_NUMBA_ENV = os.getenv("DC_USE_NUMBA", "").strip().lower()
 _DC_FAST = os.getenv("DC_FAST", "0") == "1"
 
-# Try to import numba if DC_FAST is enabled
+_NUMBA_DISABLED = _DC_USE_NUMBA_ENV in {"0", "false", "off", "no"}
+_NUMBA_REQUESTED = _DC_FAST or (_DC_USE_NUMBA_ENV not in {"", "0", "false", "off", "no"})
+
+# Try to import numba if enabled
 _NUMBA_AVAILABLE = False
-if _DC_FAST:
+if not _NUMBA_DISABLED and _NUMBA_REQUESTED:
     try:
         import numba
         _NUMBA_AVAILABLE = True
     except ImportError:
-        print("Warning: DC_FAST=1 but numba is not installed. Falling back to pure Python.")
+        print("Warning: numba requested but not installed. Falling back to pure Python.")
 
 
 # ============================================================================

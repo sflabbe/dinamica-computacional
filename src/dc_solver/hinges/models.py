@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
+from typing import TYPE_CHECKING, Dict, Optional, Tuple, List
 
 import numpy as np
 
 from plastic_hinge import NMSurfacePolygon, PlasticHingeNM, FiberSection2DStateful
-from dc_solver.fem.nodes import Node
+
+if TYPE_CHECKING:
+    from dc_solver.fem.nodes import Node
 
 # Import JIT kernel for SHM hinge evaluation (guarded by DC_FAST)
 try:
