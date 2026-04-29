@@ -13,6 +13,8 @@ from dc_solver.static.newton import solve_static_newton
 from dc_solver.utils.gravity import solve_gravity_only, GravityResult
 from dc_solver.integrators import solve_dynamic
 
+from dc_solver.modal import run_modal_analysis, ModalResults, SpectrumEC8, spectral_combination, SpectralResult
+
 # Hinge models (most-used)
 from dc_solver.hinges.models import (
     RotSpringElement,
@@ -31,6 +33,7 @@ __all__ = [
     "solve_static_newton",
     "solve_gravity_only", "GravityResult",
     "solve_dynamic",
+    "run_modal_analysis", "ModalResults", "SpectrumEC8", "spectral_combination", "SpectralResult",
     "RotSpringElement", "FiberRotSpringElement",
     "SHMBeamHinge1D", "FiberBeamHinge1D", "ColumnHingeNMRot",
     "__version__",

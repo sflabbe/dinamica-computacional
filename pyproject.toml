@@ -13,6 +13,7 @@ dependencies = [
   "numpy",
   "matplotlib",
   "plotly>=5.18",
+  "scipy>=1.10",
 ]
 
 [project.urls]
