@@ -34,7 +34,7 @@ PYTHONPATH=src:. uv run python -m problems.problema4_portico --beam-hinge shm --
 Run the Streamlit app:
 
 ```bash
-uv run --extra app streamlit run app/app.py
+uv run --extra app streamlit run app/main.py
 ```
 
 ### Recommended workflow: `uv` (Windows PowerShell)
@@ -59,7 +59,7 @@ $env:PYTHONPATH="src;."; uv run python -m problems.problema4_portico --beam-hing
 Run the Streamlit app:
 
 ```powershell
-uv run --extra app streamlit run app/app.py
+uv run --extra app streamlit run app/main.py
 ```
 
 ### `cmd.exe` equivalents (where useful)
@@ -124,7 +124,7 @@ Test commands with `pip` environments:
 ### Optional dependencies
 
 - `numba` extra: enables optional JIT acceleration when available.
-- `app` extra: installs Streamlit/pandas dependencies for `app/app.py`.
+- `app` extra: installs Streamlit/pandas dependencies for `app/main.py`.
 
 JIT is optional by design. For deterministic fast test paths (local or CI), set `DC_USE_NUMBA=0`.
 
