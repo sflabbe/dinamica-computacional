@@ -19,7 +19,7 @@ Search terms used: `validated`, `verified`, `nachgewiesen`, `EC3 design`, `EC8 d
 | README | Not a replacement for EC3/EC8/EC9 checks | Explicit disclaimer in repo root README | implemented_and_tested | Keep as-is |
 | Evidence matrix | EC8 spectrum is helper only | `docs/EVIDENCE_LEVEL.md` says partial + unit tests | implemented_partial | Keep wording as helper |
 | Evidence matrix | EC3/EC9 design placeholder | `docs/EVIDENCE_LEVEL.md` states placeholder | placeholder | Keep explicit placeholder |
-| Streamlit UI | Not a prüffähiger Nachweis | `app/app.py` caption | manual_verification_required | Keep + align modal page text |
+| Streamlit UI | Not a prüffähiger Nachweis | `app/main.py` caption | manual_verification_required | Keep + align modal page text |
 | Modal page | “not a code-level seismic design check” | `app/pages/03_Modal.py` | manual_verification_required | Tightened to explicit EC8 non-claim |
 | Steel section helper | Not full EC3 design check | `src/dc_solver/sections/steel_section.py` docstring | implemented_partial | Keep as precheck helper wording |
 | Hinge patch note | “Total verified: 60 passed.” | `docs/hinge_return_mapping_patch.md` | unsupported_claim (wording strength) | Reword to “checked by tests” |

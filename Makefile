@@ -13,7 +13,7 @@ test-fast:
 	uv run pytest -q -m "not slow"
 
 app:
-	uv run --extra app streamlit run app/app.py
+	uv run --extra app streamlit run app/main.py
 
 smoke-app:
 	PYTHONPATH=src:. python tools/smoke_app_services.py
