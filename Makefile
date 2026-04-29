@@ -1,14 +1,22 @@
-
-.PHONY: sync test test-fast lock lock-check smoke clean
+.PHONY: sync test test-no-numba test-fast lock lock-check smoke smoke-app app clean
 
 sync:
 	uv sync --all-extras --dev
 
+test-no-numba:
+	DC_USE_NUMBA=0 PYTHONPATH=src:. pytest -q
+
 test:
-	uv run pytest -q
+	PYTHONPATH=src:. pytest -q
 
 test-fast:
 	uv run pytest -q -m "not slow"
+
+app:
+	uv run --extra app streamlit run app/app.py
+
+smoke-app:
+	PYTHONPATH=src:. python tools/smoke_app_services.py
 
 lock:
 	uv lock
