@@ -11,7 +11,7 @@ from app.components.modal_viewer import (
 from app.services import frame_service, modal_service
 
 st.title("Modal")
-st.warning("Modal analysis is preliminary and uses the current assembled tangent stiffness. It is not a code-level seismic design check.")
+st.warning("Modal analysis is preliminary and uses the current assembled tangent stiffness. It is not an EC8 design check; manual verification is required for code compliance.")
 
 frame_input = st.session_state.get("frame_input")
 if frame_input is None:

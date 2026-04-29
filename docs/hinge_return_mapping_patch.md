@@ -25,4 +25,4 @@ The test suite was run in chunks due to the notebook execution timeout:
 - 58 project tests passed across `tests/test_*.py`.
 - 2 smoke tests passed from `tools/smoke_test.py`.
 
-Total verified: 60 passed.
+Total checked by tests: 60 passed.
