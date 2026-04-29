@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import plotly.graph_objects as go
 
+from dc_solver.modal import ModalResults, SpectrumEC8
 from .results import DynamicResult, FrameStateResult, HingeTimeHistory
 
 
@@ -44,13 +45,18 @@ def plot_energy_balance(result: DynamicResult):
     return fig
 
 
-def plot_mode_shape(*args, **kwargs):
+def plot_mode_shape(modal: ModalResults, mode_index=0, *, scale=1.0):
+    vec = modal.modes_full[:, mode_index]
     fig = go.Figure()
-    fig.add_annotation(text="Placeholder Fase 2: mode shape not implemented yet.", x=0.5, y=0.5, showarrow=False)
+    fig.add_trace(go.Scatter(x=np.arange(vec.size), y=vec * scale, mode="lines+markers", name=f"mode {mode_index+1}"))
+    fig.update_layout(title=f"Mode shape {mode_index+1}", xaxis_title="DOF", yaxis_title="Amplitude")
     return fig
 
 
-def plot_response_spectrum(*args, **kwargs):
+def plot_response_spectrum(spectrum: SpectrumEC8, *, t_min=0.0, t_max=4.0, n=400):
+    T = np.linspace(t_min, t_max, n)
+    Sa = spectrum.Sa(T)
     fig = go.Figure()
-    fig.add_annotation(text="Placeholder Fase 2: response spectrum not implemented yet.", x=0.5, y=0.5, showarrow=False)
+    fig.add_trace(go.Scatter(x=T, y=Sa, mode="lines", name="Sa(T)"))
+    fig.update_layout(title="Elastic response spectrum (helper)", xaxis_title="T [s]", yaxis_title="Sa [m/s²]")
     return fig
