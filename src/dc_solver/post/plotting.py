@@ -96,12 +96,13 @@ def _scaled_displacements(model: Model, u: Optional[np.ndarray], scale: float) -
     if u is None:
         return None
     u_plot = u.copy()
+    # Collect unique translational DOFs — aux nodes share dof_u with parent nodes
+    trans_dofs: set[int] = set()
     for nd in model.nodes:
-        ux, uy = nd.dof_u
-        u_plot[ux] *= scale
-        u_plot[uy] *= scale
+        trans_dofs.update(nd.dof_u)
+    for dof in trans_dofs:
+        u_plot[dof] *= scale
     return u_plot
-
 
 def _auto_scale(model: Model, states: Iterable[np.ndarray], max_scale: float = 200.0) -> float:
     xs = [nd.x for nd in model.nodes]

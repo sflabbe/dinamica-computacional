@@ -414,9 +414,11 @@ def build_portal_beam_hinge(
         fiber_left = FiberBeamHinge1D(
             section=beam_sec,
             Lp=Lp_beam,
-            N_target=0.0,  # overwritten during assembly from beam axial force
+            N_target=0.0,
             kappa_factor=2.0,
             moment_sign=-1.0,
+            tol_N=100.0,   
+            max_iter_eps0=80,
             line_search=bool(fiber_line_search),
         )
         fiber_right = FiberBeamHinge1D(
@@ -425,6 +427,8 @@ def build_portal_beam_hinge(
             N_target=0.0,  # overwritten during assembly from beam axial force
             kappa_factor=2.0,
             moment_sign=-1.0,
+            tol_N=100.0,   
+            max_iter_eps0=80,
             line_search=bool(fiber_line_search),
         )
 
@@ -1343,11 +1347,11 @@ def main():
                 u_hist = np.vstack([np.zeros_like(u_g), u_g])
                 drift_hist = np.array([0.0, float(r4.get("drift", 0.0))], float)
                 last_grav = {
-                    "u": u_hist,
-                    "t": np.array([0.0, 1.0], float),
-                    "drift": drift_hist,
+                    "u": u_g[np.newaxis, :],      # shape (1, ndof)
+                    "t": np.array([0.0], float),
+                    "drift": np.array([float(r4.get("drift", 0.0))], float),
                     "snapshot_limit": float(args.snapshot_limit),
-                }
+                }       
 
                 # Use geometric height from the model (avoid relying on hard-coded H)
                 ys = np.array([nd.y for nd in model4.nodes], dtype=float)
